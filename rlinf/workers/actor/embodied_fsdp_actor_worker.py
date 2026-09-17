@@ -307,6 +307,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "loss_mask": self.rollout_batch.get("loss_mask", None),
             "loss_mask_sum": self.rollout_batch.get("loss_mask_sum", None),
             "advantage_mode": self.cfg.algorithm.get("advantage_mode", None),
+            # These are produced by the optional Role-Graph Event Observer
+            # sidecar.  Keeping them in the rollout batch means the π0.5
+            # Flow-SDE policy and PPO loss remain untouched.
+            "event_ids": self.rollout_batch.get("event_ids", None),
+            "event_values": self.rollout_batch.get("event_values", None),
+            "intervention_influence": self.rollout_batch.get(
+                "intervention_influence", None
+            ),
+            "influence_temperature": self.cfg.algorithm.get(
+                "influence_temperature", 1.0
+            ),
         }
 
         advantages_and_returns = calculate_adv_and_returns(**kwargs)

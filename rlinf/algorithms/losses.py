@@ -444,6 +444,17 @@ def compute_ppo_actor_critic_loss(**kwargs) -> tuple[torch.Tensor, dict]:
     return loss, metrics_data
 
 
+@register_policy_loss("event_actor")
+def compute_event_smdp_actor_loss(**kwargs) -> tuple[torch.Tensor, dict]:
+    """Apply unchanged PPO actor loss to Event-SMDP advantages.
+
+    The Event Value Critic is an observer sidecar trained on its own SMDP
+    targets. It is not the π0.5 VLA value head, so this update must not silently
+    train the latter with Event Value returns.
+    """
+    return compute_ppo_actor_loss(**kwargs)
+
+
 @register_policy_loss("opd")
 def compute_opd_actor_loss(
     logprobs: torch.Tensor,

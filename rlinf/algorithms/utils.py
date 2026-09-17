@@ -70,6 +70,9 @@ def preprocess_embodied_advantages_inputs(
     values: Optional[torch.Tensor] = None,
     loss_mask: Optional[torch.Tensor] = None,
     loss_mask_sum: Optional[torch.Tensor] = None,
+    event_ids: Optional[torch.Tensor] = None,
+    event_values: Optional[torch.Tensor] = None,
+    intervention_influence: Optional[torch.Tensor] = None,
     **kwargs,
 ) -> dict:
     """
@@ -118,6 +121,21 @@ def preprocess_embodied_advantages_inputs(
         )
         values = flattened_values_full[: n_steps + 1]
 
+    if kwargs["adv_type"] == "event_smdp_interventional":
+        if event_ids is None or event_values is None or intervention_influence is None:
+            raise ValueError(
+                "event_smdp_interventional requires event_ids, event_values "
+                "and intervention_influence in the rollout batch"
+            )
+        event_ids = event_ids.transpose(1, 2).reshape(n_steps, bsz)
+        intervention_influence = intervention_influence.transpose(1, 2).reshape(
+            n_steps, bsz
+        )
+        flattened_event_values = event_values.transpose(1, 2).reshape(
+            (num_chunk + 1) * chunk_size, bsz
+        )
+        event_values = flattened_event_values[: n_steps + 1]
+
     kwargs.update(
         {
             "rewards": rewards,
@@ -125,6 +143,9 @@ def preprocess_embodied_advantages_inputs(
             "values": values,
             "loss_mask": loss_mask,
             "loss_mask_sum": loss_mask_sum,
+            "event_ids": event_ids,
+            "event_values": event_values,
+            "intervention_influence": intervention_influence,
         }
     )
 

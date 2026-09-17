@@ -13,4 +13,4 @@
 # limitations under the License.
 from rlinf.agents.tool_call import parsers as toolcall_parsers  # noqa: F401
 
-from . import advantages, loss_scales, losses  # noqa: F401
+from . import advantages, event_credit, event_intervention, loss_scales, losses  # noqa: F401

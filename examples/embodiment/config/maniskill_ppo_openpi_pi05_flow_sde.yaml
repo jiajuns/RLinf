@@ -1,0 +1,21 @@
+# πRL π0.5 PPO Flow-SDE reproduction recipe.
+# This derives from the stock ManiSkill π0.5 PPO configuration, whose default
+# is Flow-Noise.  Keeping it separate makes the baseline comparison auditable.
+defaults:
+  - maniskill_ppo_openpi_pi05
+
+runner:
+  logger:
+    experiment_name: "maniskill_ppo_openpi_pi05_flow_sde"
+
+algorithm:
+  adv_type: event_smdp_interventional
+  loss_type: event_actor
+  entropy_bonus: 0.0
+
+actor:
+  model:
+    openpi:
+      noise_method: "flow_sde"
+      noise_level: 0.5
+      joint_logprob: false
