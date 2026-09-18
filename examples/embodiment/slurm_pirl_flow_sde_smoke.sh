@@ -39,10 +39,13 @@ PIRL_SAVE_INTERVAL="${PIRL_SAVE_INTERVAL:--1}"
 PIRL_VAL_INTERVAL="${PIRL_VAL_INTERVAL:-10}"
 PIRL_LOG_PATH="${PIRL_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke}"
 PIRL_EXPERIMENT_NAME="${PIRL_EXPERIMENT_NAME:-official_pi05_flow_sde_smoke}"
+# Keep the audited baseline default, while allowing a separate, explicit
+# Event-SMDP smoke submission without editing this shared launcher.
+PIRL_CONFIG_NAME="${PIRL_CONFIG_NAME:-maniskill_ppo_openpi_pi05_flow_sde}"
 
 python examples/embodiment/train_embodied_agent.py \
   --config-path config \
-  --config-name maniskill_ppo_openpi_pi05 \
+  --config-name "$PIRL_CONFIG_NAME" \
   runner.max_epochs="$PIRL_MAX_EPOCHS" runner.max_steps="$PIRL_MAX_STEPS" \
   runner.save_interval="$PIRL_SAVE_INTERVAL" runner.val_check_interval="$PIRL_VAL_INTERVAL" \
   runner.logger.log_path="$PIRL_LOG_PATH" \
