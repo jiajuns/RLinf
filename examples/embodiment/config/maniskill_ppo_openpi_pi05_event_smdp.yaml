@@ -2,7 +2,11 @@
 # temporal credit.  This is intentionally separate from the later learned
 # Event Observer and same-state interventional credit experiment.
 defaults:
-  - maniskill_ppo_openpi_pi05_flow_sde
+  # ``maniskill_ppo_openpi_pi05`` is the Hydra primary composition root.
+  # Referencing the Flow-SDE convenience config here would make that root a
+  # nested default, which Hydra rejects because it declares a searchpath.
+  - maniskill_ppo_openpi_pi05
+  - _self_
 
 runner:
   logger:
@@ -15,6 +19,13 @@ algorithm:
   # Event credit must operate per executed action, not after chunk reward
   # aggregation, so oracle event durations remain observable.
   reward_type: action_level
+
+actor:
+  model:
+    openpi:
+      noise_method: flow_sde
+      noise_level: 0.5
+      joint_logprob: false
 
 env:
   train:
