@@ -116,6 +116,21 @@ def preprocess_embodied_advantages_inputs(
     dones = flattened_dones_full[-(n_steps + 1) :]
 
     if kwargs["adv_type"] == "gae":
+        if values is None:
+            raise ValueError("GAE requires values or an explicit critic-free advantage")
+        if values.ndim != 3:
+            raise ValueError("embodied GAE values must be [num_chunks + 1, batch, width]")
+        if values.shape[-1] == 1 and chunk_size > 1:
+            # π0.5 emits a value at each policy-chunk boundary.  For the
+            # action-level GAE control we use the same piecewise-constant
+            # boundary-value proxy as Event-SMDP, so reward granularity—not
+            # value tensor shape—is the only difference from chunk-level GAE.
+            values = values.expand(-1, -1, chunk_size).contiguous()
+        elif values.shape[-1] != chunk_size:
+            raise ValueError(
+                "GAE value width must be 1 or equal reward action-chunk width; "
+                f"got {values.shape[-1]} and {chunk_size}."
+            )
         flattened_values_full = values.transpose(1, 2).reshape(
             (num_chunk + 1) * chunk_size, bsz
         )
