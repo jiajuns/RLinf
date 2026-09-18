@@ -555,6 +555,14 @@ class EnvWorker(Worker):
                 intervene_actions = infos["final_info"]["intervene_action"]
                 intervene_flags = infos["final_info"]["intervene_flag"]
 
+        def _stack_oracle_field(field_name: str) -> torch.Tensor | None:
+            if not isinstance(infos_list, (list, tuple)) or not infos_list:
+                return None
+            values = [info.get(field_name) if isinstance(info, dict) else None for info in infos_list]
+            if any(value is None for value in values):
+                return None
+            return torch.stack([torch.as_tensor(value) for value in values], dim=1)
+
         env_output = EnvOutput(
             obs=extracted_obs,
             final_obs=final_obs,
@@ -566,6 +574,8 @@ class EnvWorker(Worker):
             intervene_actions=intervene_actions,
             intervene_flags=intervene_flags,
             rlt_switch_flags=rlt_switch_flags,
+            oracle_event_ids=_stack_oracle_field("oracle_event_id"),
+            oracle_event_progress=_stack_oracle_field("oracle_event_progress"),
         )
         chunk_step_payload = {
             "chunk_actions": exec_actions,
@@ -1193,6 +1203,8 @@ class EnvWorker(Worker):
                         truncations=env_output.truncations,
                         terminations=env_output.terminations,
                         rewards=rewards,
+                        oracle_event_ids=env_output.oracle_event_ids,
+                        oracle_event_progress=env_output.oracle_event_progress,
                     )
 
                     self.trajectory_builders[stage_id].append_step_result(
@@ -1345,6 +1357,8 @@ class EnvWorker(Worker):
                     truncations=env_output.truncations,
                     terminations=env_output.terminations,
                     rewards=rewards,
+                    oracle_event_ids=env_output.oracle_event_ids,
+                    oracle_event_progress=env_output.oracle_event_progress,
                 )
                 self.trajectory_builders[stage_id].append_step_result(chunk_step_result)
                 if (

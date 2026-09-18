@@ -52,6 +52,11 @@ class EnvOutput:
     intervene_actions: Optional[torch.Tensor] = None  # [B]
     intervene_flags: Optional[torch.Tensor] = None  # [B]
     rlt_switch_flags: Optional[torch.Tensor] = None  # [B] or [B, action_chunk]
+    # Task-provided oracle event annotations.  These deliberately live beside
+    # environment outputs rather than policy outputs: they are supervision for
+    # the Event-SMDP ablation, not VLA observations.
+    oracle_event_ids: Optional[torch.Tensor] = None  # [B, action_chunk]
+    oracle_event_progress: Optional[torch.Tensor] = None  # [B, action_chunk]
 
     def __post_init__(self):
         self.obs = put_tensor_device(self.obs, "cpu")
@@ -92,6 +97,16 @@ class EnvOutput:
         self.rlt_switch_flags = (
             self.rlt_switch_flags.cpu().contiguous()
             if self.rlt_switch_flags is not None
+            else None
+        )
+        self.oracle_event_ids = (
+            self.oracle_event_ids.cpu().contiguous()
+            if self.oracle_event_ids is not None
+            else None
+        )
+        self.oracle_event_progress = (
+            self.oracle_event_progress.cpu().contiguous()
+            if self.oracle_event_progress is not None
             else None
         )
 
@@ -226,6 +241,12 @@ class EnvOutput:
             rlt_switch_flags=_merge_optional_tensor_field(
                 "rlt_switch_flags", allow_partial_none=True, fill_value=False
             ),
+            oracle_event_ids=_merge_optional_tensor_field(
+                "oracle_event_ids", allow_partial_none=True, fill_value=-1
+            ),
+            oracle_event_progress=_merge_optional_tensor_field(
+                "oracle_event_progress", allow_partial_none=True, fill_value=0.0
+            ),
         ).to_dict()
 
     def to_dict(self) -> dict[str, Any]:
@@ -244,6 +265,8 @@ class EnvOutput:
             "intervene_actions": self.intervene_actions,
             "intervene_flags": self.intervene_flags,
             "rlt_switch_flags": self.rlt_switch_flags,
+            "oracle_event_ids": self.oracle_event_ids,
+            "oracle_event_progress": self.oracle_event_progress,
         }
 
 
@@ -354,6 +377,8 @@ class ChunkStepResult:
     rewards: torch.Tensor = None  # [B, 1]
     forward_inputs: dict[str, torch.Tensor] = field(default_factory=dict)
     versions: torch.Tensor = None  # [B, 1]
+    oracle_event_ids: torch.Tensor = None  # [B, action_chunk]
+    oracle_event_progress: torch.Tensor = None  # [B, action_chunk]
 
     def __post_init__(self):
         if self.actions is not None:
@@ -374,6 +399,10 @@ class ChunkStepResult:
             self.forward_inputs = put_tensor_device(self.forward_inputs, "cpu")
         if self.versions is not None:
             self.versions = self.versions.cpu().contiguous()
+        if self.oracle_event_ids is not None:
+            self.oracle_event_ids = self.oracle_event_ids.cpu().contiguous()
+        if self.oracle_event_progress is not None:
+            self.oracle_event_progress = self.oracle_event_progress.cpu().contiguous()
 
 
 @dataclass
@@ -393,6 +422,12 @@ class Trajectory:
     prev_logprobs: torch.Tensor = None
     prev_values: torch.Tensor = None
     versions: torch.Tensor = None
+    # [trajectory chunks, batch, action_chunk].  The separate Event Value
+    # critic will later replace the pi0.5-value proxy used by the temporal
+    # oracle ablation; keeping IDs/progress in the trajectory makes that
+    # replacement independent of the rollout transport path.
+    event_ids: torch.Tensor = None
+    event_progress: torch.Tensor = None
     forward_inputs: dict[str, Any] = field(default_factory=dict)
     curr_obs: dict[str, Any] = field(default_factory=dict)
     next_obs: dict[str, Any] = field(default_factory=dict)

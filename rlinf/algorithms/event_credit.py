@@ -103,3 +103,34 @@ def compute_event_smdp_interventional_advantages(
     if normalize_advantages:
         advantages = safe_normalize(advantages, loss_mask=loss_mask)
     return advantages, returns
+
+
+@register_advantage("event_smdp_temporal")
+def compute_event_smdp_temporal_advantages(
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    event_ids: torch.Tensor | None = None,
+    event_values: torch.Tensor | None = None,
+    gamma: float = 1.0,
+    normalize_advantages: bool = True,
+    loss_mask: torch.Tensor | None = None,
+    **_kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Oracle-event SMDP target with uniform within-event temporal credit.
+
+    This is a named ablation, not the proposed interventional estimator: the
+    influence is identically zero until same-state Flow-SDE branches are wired.
+    """
+    if event_ids is None or event_values is None:
+        raise ValueError("event_smdp_temporal requires event_ids and event_values")
+    advantages, returns = event_smdp_credit(
+        rewards,
+        dones,
+        event_ids,
+        event_values,
+        torch.zeros_like(event_ids, dtype=event_values.dtype),
+        gamma=gamma,
+    )
+    if normalize_advantages:
+        advantages = safe_normalize(advantages, loss_mask=loss_mask)
+    return advantages, returns

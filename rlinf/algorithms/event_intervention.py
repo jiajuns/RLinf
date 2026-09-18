@@ -19,11 +19,24 @@ class SnapshotEnvironment(Protocol):
     def get_state(self) -> Any:
         """Return a complete cloneable simulator state."""
 
-    def set_state(self, state: Any) -> None:
+    def load_state(self, state: Any) -> None:
         """Restore a state emitted by :meth:`get_state`."""
 
 
 BranchRollout = Callable[[Any], tuple[torch.Tensor, torch.Tensor, int]]
+
+
+def _restore_snapshot(environment: SnapshotEnvironment, state: Any) -> None:
+    """Use RLinf's real ManiSkill snapshot API, retaining legacy test adapters."""
+    restore = getattr(environment, "load_state", None)
+    if restore is None:
+        # ``set_state`` is retained only for light-weight third-party adapters;
+        # ManiSkillOffloadEnv exposes ``load_state`` because its snapshot is a
+        # serialized complete state rather than a raw simulator tensor.
+        restore = getattr(environment, "set_state", None)
+    if restore is None:
+        raise TypeError("controlled branches require load_state() or set_state()")
+    restore(state)
 
 
 def branch_event_returns(
@@ -45,13 +58,13 @@ def branch_event_returns(
     values: list[torch.Tensor] = []
     try:
         for action in actions:
-            environment.set_state(snapshot)
+            _restore_snapshot(environment, snapshot)
             rewards, future_value, executed_steps = rollout(action)
             if executed_steps < 0:
                 raise ValueError("branch rollout returned a negative horizon")
             values.append(rewards + (gamma**executed_steps) * future_value)
     finally:
-        environment.set_state(snapshot)
+        _restore_snapshot(environment, snapshot)
     return torch.stack(values)
 
 

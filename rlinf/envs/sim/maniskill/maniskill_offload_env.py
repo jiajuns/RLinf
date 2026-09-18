@@ -69,10 +69,11 @@ class _ManiskillEnvCore(ManiskillEnv, EnvOffloadMixin):
         }
 
         user_defined_task_reset_states = getattr(self.env, "task_reset_states", {})
-        for key, value in user_defined_task_reset_states.items():
-            if torch.is_tensor(value):
-                user_defined_task_reset_states[key] = value.cpu()
-
+        # Do not mutate the live task state merely to serialize it.
+        user_defined_task_reset_states = {
+            key: value.detach().cpu().clone() if torch.is_tensor(value) else value
+            for key, value in user_defined_task_reset_states.items()
+        }
         user_defined_task_metric_states = getattr(self.env, "task_metric_states", {})
 
         simulator_state = {
@@ -130,6 +131,13 @@ class _ManiskillEnvCore(ManiskillEnv, EnvOffloadMixin):
 
         self.env.set_state(state["sim_state"])
 
+        action_space_state = state["action_space_state"]
+        self.env.unwrapped.action_space = action_space_state["action_space"]
+        self.env.unwrapped.single_action_space = action_space_state["single_action_space"]
+        self.env.unwrapped._orig_single_action_space = action_space_state[
+            "_orig_single_action_space"
+        ]
+
         self.env.unwrapped.scene.set_timestep(state["sim_timestep"])
         self.env.unwrapped._elapsed_steps = state["elapsed_steps"].to(
             self.env.unwrapped.device
@@ -138,6 +146,19 @@ class _ManiskillEnvCore(ManiskillEnv, EnvOffloadMixin):
             state["agent_controller_state"], self.env.device
         )
         self.env.agent.controller.set_state(controller_state)
+
+        self.env.unwrapped._init_raw_obs = recursive_to_device(
+            state["_init_raw_obs"], self.env.device
+        )
+        # Maniskill's high-level ``set_state`` does not restore all PhysX
+        # buffers.  Restore them before refreshing kinematics so a branch is
+        # genuinely controlled from the saved simulator state.
+        for name, value in state["physx_state"].items():
+            buffer = getattr(self.env.unwrapped.scene.px, name).torch()
+            buffer.copy_(value.to(buffer.device))
+        self.env.unwrapped.scene._gpu_apply_all()
+        self.env.unwrapped.scene.px.gpu_update_articulation_kinematics()
+        self.env.unwrapped.scene._gpu_fetch_all()
 
         # Restore RNG state
         rng_state = state["rng_state"]
@@ -168,6 +189,11 @@ class _ManiskillEnvCore(ManiskillEnv, EnvOffloadMixin):
             self.success_once = state["success_once"].to(self.device)
             self.fail_once = state["fail_once"].to(self.device)
             self.returns = state["returns"].to(self.device)
+
+    # Compatibility for generic snapshot adapters.  New branch code calls
+    # ``load_state`` explicitly; this alias keeps existing integrations valid.
+    def set_state(self, state_buffer: bytes):
+        self.load_state(state_buffer)
 
 
 def _maniskill_worker_main(
@@ -398,6 +424,9 @@ class ManiskillOffloadEnv(EnvOffloadMixin):
 
     def load_state(self, state: bytes):
         self._rpc("load_state", args=[state])
+
+    def set_state(self, state: bytes):
+        self.load_state(state)
 
     def _rpc(self, method_name, args=None, kwargs=None, timeout_s=None):
         if self.process is None or not self.process.is_alive():

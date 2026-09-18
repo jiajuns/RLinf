@@ -69,6 +69,20 @@ class ManiskillEnv(gym.Env):
         self.video_cfg = cfg.video_cfg
 
         self.cfg = cfg
+        event_oracle_cfg = getattr(cfg, "event_oracle", None)
+        self.event_oracle_enabled = bool(
+            getattr(event_oracle_cfg, "enabled", False)
+        )
+        self.event_oracle_align_distance = float(
+            getattr(event_oracle_cfg, "align_distance", 0.08)
+        )
+        self.event_oracle_transport_distance = float(
+            getattr(event_oracle_cfg, "transport_distance", 0.20)
+        )
+        self.event_oracle_grasp_steps = int(
+            getattr(event_oracle_cfg, "grasp_confirmation_steps", 2)
+        )
+        self._oracle_previous_event_ids: torch.Tensor | None = None
 
         with open_dict(cfg):
             cfg.init_params.num_envs = num_envs
@@ -271,6 +285,52 @@ class ManiskillEnv(gym.Env):
         infos["episode"] = episode_info
         return infos
 
+    def _attach_oracle_event_info(self, infos: dict) -> dict:
+        """Attach task-state oracle labels for the first Event-SMDP ablation.
+
+        This is intentionally *not* a learned Event Observer.  It uses only
+        ManiSkill privileged task metrics, and is enabled exclusively by the
+        ``event_oracle`` config block.  The labels give us a reproducible
+        phase-2 control before the RGB Role-Graph Event Observer is trained.
+        """
+        if not self.event_oracle_enabled:
+            return infos
+
+        device = self.device
+        event_id = torch.full((self.num_envs,), -1, dtype=torch.long, device=device)
+        grasped = infos.get("is_src_obj_grasped")
+        success = infos.get("success")
+        distance = infos.get("carrot_plate_dist")
+        consecutive = infos.get("consecutive_grasp")
+        if grasped is not None:
+            grasped = torch.as_tensor(grasped, device=device, dtype=torch.bool)
+            # 0 approach; 1 grasp confirmation; 2 lift; 3 transport;
+            # 4 align; 5 place/success.  Contiguous runs, not label identity,
+            # define SMDP events downstream.
+            event_id[~grasped] = 0
+            event_id[grasped] = 2
+            if consecutive is not None:
+                confirmed = torch.as_tensor(consecutive, device=device) >= self.event_oracle_grasp_steps
+                event_id[grasped & ~confirmed] = 1
+            if distance is not None:
+                distance = torch.as_tensor(distance, device=device, dtype=torch.float32)
+                event_id[grasped & (distance <= self.event_oracle_transport_distance)] = 3
+                event_id[grasped & (distance <= self.event_oracle_align_distance)] = 4
+        if success is not None:
+            event_id[torch.as_tensor(success, device=device, dtype=torch.bool)] = 5
+
+        max_steps = max(int(getattr(self.cfg, "max_episode_steps", 1)), 1)
+        progress = self.elapsed_steps.to(device=device, dtype=torch.float32) / max_steps
+        if self._oracle_previous_event_ids is None:
+            boundary = torch.ones_like(event_id, dtype=torch.bool)
+        else:
+            boundary = event_id != self._oracle_previous_event_ids
+        self._oracle_previous_event_ids = event_id.clone()
+        infos["oracle_event_id"] = event_id
+        infos["oracle_event_progress"] = progress.clamp_(0.0, 1.0)
+        infos["oracle_event_boundary"] = boundary
+        return infos
+
     def reset(
         self,
         *,
@@ -292,6 +352,8 @@ class ManiskillEnv(gym.Env):
             self._reset_metrics(env_idx)
         else:
             self._reset_metrics()
+        self._oracle_previous_event_ids = None
+        infos = self._attach_oracle_event_info(infos)
         return extracted_obs, infos
 
     def step(
@@ -304,6 +366,7 @@ class ManiskillEnv(gym.Env):
         step_reward = self._calc_step_reward(_reward, infos)
 
         infos = self._record_metrics(step_reward, infos)
+        infos = self._attach_oracle_event_info(infos)
         if isinstance(terminations, bool):
             terminations = torch.tensor([terminations], device=self.device)
         if isinstance(truncations, bool):

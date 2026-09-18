@@ -121,16 +121,18 @@ def preprocess_embodied_advantages_inputs(
         )
         values = flattened_values_full[: n_steps + 1]
 
-    if kwargs["adv_type"] == "event_smdp_interventional":
-        if event_ids is None or event_values is None or intervention_influence is None:
+    if kwargs["adv_type"] in ("event_smdp_interventional", "event_smdp_temporal"):
+        if event_ids is None or event_values is None:
             raise ValueError(
-                "event_smdp_interventional requires event_ids, event_values "
-                "and intervention_influence in the rollout batch"
+                f"{kwargs['adv_type']} requires event_ids and event_values in the rollout batch"
             )
+        if kwargs["adv_type"] == "event_smdp_interventional" and intervention_influence is None:
+            raise ValueError("event_smdp_interventional requires intervention_influence")
         event_ids = event_ids.transpose(1, 2).reshape(n_steps, bsz)
-        intervention_influence = intervention_influence.transpose(1, 2).reshape(
-            n_steps, bsz
-        )
+        if intervention_influence is not None:
+            intervention_influence = intervention_influence.transpose(1, 2).reshape(
+                n_steps, bsz
+            )
         flattened_event_values = event_values.transpose(1, 2).reshape(
             (num_chunk + 1) * chunk_size, bsz
         )

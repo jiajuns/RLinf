@@ -291,6 +291,25 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.cfg.algorithm.adv_type == "opd":
             self.compute_opd_teacher_logprobs()
 
+        # Phase-2 oracle control uses the already-collected π0.5 value head as
+        # a temporary bootstrap proxy.  It is deliberately explicit in config;
+        # the learned Event Value Critic replaces this field in the next phase.
+        if self.cfg.algorithm.adv_type == "event_smdp_temporal":
+            if self.rollout_batch.get("event_ids") is None:
+                raise RuntimeError(
+                    "event_smdp_temporal needs env.train.event_oracle.enabled=true "
+                    "and task oracle_event_id annotations."
+                )
+            if self.cfg.algorithm.get("event_value_source", None) != "pi05_value_proxy":
+                raise RuntimeError(
+                    "event_smdp_temporal currently supports only "
+                    "algorithm.event_value_source=pi05_value_proxy."
+                )
+            self.rollout_batch["event_values"] = self.rollout_batch.get("prev_values")
+            self.rollout_batch["intervention_influence"] = torch.zeros_like(
+                self.rollout_batch["event_ids"], dtype=self.rollout_batch["prev_values"].dtype
+            )
+
         kwargs = {
             "task_type": self.cfg.runner.task_type,
             "adv_type": self.cfg.algorithm.adv_type,

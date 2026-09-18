@@ -62,6 +62,8 @@ class EmbodiedTrajectoryBuilder:
         default_factory=list
     )  # trajectory_length + rollout_epoch
     versions: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
+    event_ids: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
+    event_progress: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
     forward_inputs: list[dict[str, Any]] = field(
         default_factory=list
     )  # trajectory_length
@@ -89,6 +91,13 @@ class EmbodiedTrajectoryBuilder:
             self.prev_values.append(result.prev_values)
         if result.versions is not None:
             self.versions.append(result.versions)
+        # The bootstrap policy output has no environment reward/event.  Only
+        # append labels with a real transition so their time dimension exactly
+        # matches ``rewards`` (while ``prev_values`` remains T+1).
+        if result.rewards is not None and result.oracle_event_ids is not None:
+            self.event_ids.append(result.oracle_event_ids)
+            if result.oracle_event_progress is not None:
+                self.event_progress.append(result.oracle_event_progress)
         if result.forward_inputs:
             self.forward_inputs.append(result.forward_inputs)
 
@@ -169,6 +178,8 @@ class EmbodiedTrajectoryBuilder:
         self.prev_logprobs.clear()
         self.prev_values.clear()
         self.versions.clear()
+        self.event_ids.clear()
+        self.event_progress.clear()
         self.forward_inputs.clear()
         self.curr_obs.clear()
         self.next_obs.clear()
@@ -205,6 +216,12 @@ class EmbodiedTrajectoryBuilder:
             )
         if len(self.versions) > 0:
             trajectory.versions = torch.stack(self.versions, dim=0).cpu().contiguous()
+        if len(self.event_ids) > 0:
+            trajectory.event_ids = torch.stack(self.event_ids, dim=0).cpu().contiguous()
+        if len(self.event_progress) > 0:
+            trajectory.event_progress = (
+                torch.stack(self.event_progress, dim=0).cpu().contiguous()
+            )
         if len(self.forward_inputs) > 0:
             trajectory.forward_inputs = stack_list_of_dict_tensor(self.forward_inputs)
             for key in trajectory.forward_inputs.keys():

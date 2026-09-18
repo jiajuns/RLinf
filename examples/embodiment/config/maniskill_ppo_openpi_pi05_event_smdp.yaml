@@ -1,5 +1,6 @@
-# Proposed method: only the advantage and policy-loss wiring differ from the
-# audited Flow-SDE π0.5 πRL baseline.
+# Phase-2 reproducible control: privileged ManiSkill oracle events + SMDP
+# temporal credit.  This is intentionally separate from the later learned
+# Event Observer and same-state interventional credit experiment.
 defaults:
   - maniskill_ppo_openpi_pi05_flow_sde
 
@@ -8,6 +9,17 @@ runner:
     experiment_name: "maniskill_ppo_openpi_pi05_event_smdp"
 
 algorithm:
-  adv_type: event_smdp_interventional
+  adv_type: event_smdp_temporal
   loss_type: event_actor
-  influence_temperature: 1.0
+  event_value_source: pi05_value_proxy
+  # Event credit must operate per executed action, not after chunk reward
+  # aggregation, so oracle event durations remain observable.
+  reward_type: action_level
+
+env:
+  train:
+    event_oracle:
+      enabled: true
+      align_distance: 0.08
+      transport_distance: 0.20
+      grasp_confirmation_steps: 2
