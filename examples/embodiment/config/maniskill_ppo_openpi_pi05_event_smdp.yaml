@@ -44,7 +44,10 @@ algorithm:
   reward_coef: 1.0
   # Do not aggregate over chunks: each executed action needs an event label.
   reward_type: action_level
-  logprob_type: chunk_level
+  # Event credit is assigned to individual executed actions, so its PPO
+  # likelihood must retain the corresponding action axis.  This also keeps
+  # the baseline/Event contrast limited to the credit estimator.
+  logprob_type: action_level
   entropy_type: chunk_level
   update_epoch: 5
   adv_type: event_smdp_temporal
