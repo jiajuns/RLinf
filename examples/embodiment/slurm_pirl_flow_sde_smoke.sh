@@ -3,8 +3,9 @@
 # acd_ue has the same ACD1 GPU pool as acd_u, but higher scheduling priority.
 # Do not use debug: its per-user GPU QoS is already occupied by another job.
 #SBATCH --partition=acd_ue
-# ACD1-54 passed the same ManiSkill GPU-render probe; ACD1-25 did not.
-#SBATCH --nodelist=ACD1-54
+# Do not pin a GPU node.  A stale Vulkan context can make an individual node
+# temporarily unavailable; Slurm must be free to select another H100 node for
+# the single-job ManiSkill render probe and the matched training campaign.
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
