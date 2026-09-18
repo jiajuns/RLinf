@@ -1,0 +1,13 @@
+# Proposed method: only the advantage and policy-loss wiring differ from the
+# audited Flow-SDE π0.5 πRL baseline.
+defaults:
+  - maniskill_ppo_openpi_pi05_flow_sde
+
+runner:
+  logger:
+    experiment_name: "maniskill_ppo_openpi_pi05_event_smdp"
+
+algorithm:
+  adv_type: event_smdp_interventional
+  loss_type: event_actor
+  influence_temperature: 1.0

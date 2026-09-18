@@ -9,8 +9,7 @@ runner:
     experiment_name: "maniskill_ppo_openpi_pi05_flow_sde"
 
 algorithm:
-  adv_type: event_smdp_interventional
-  loss_type: event_actor
+  # Official πRL comparison: unchanged GAE critic and PPO actor-critic loss.
   entropy_bonus: 0.0
 
 actor:

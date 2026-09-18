@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=pirl_fsd_smoke
+#SBATCH --partition=debug
+#SBATCH --gres=gpu:1
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=00:08:00
+#SBATCH --output=/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke_%j.out
+#SBATCH --error=/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke_%j.err
+
+# End-to-end official πRL smoke. Only scale is reduced; Flow-SDE, GAE and the
+# stock PPO actor-critic algorithm remain those in the baseline config.
+set -euo pipefail
+ROOT=/data/user/leviccdong/EKSF/code/RLinf-piRL
+MODEL=/data/user/leviccdong/EKSF/models/RLinf-Pi05-ManiSkill-25Main-SFT
+ASSETS=/data/user/leviccdong/EKSF/staging/pirl_assets/maniskill_assets
+source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
+export EMBODIED_PATH="$ROOT/examples/embodiment"
+export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
+export MANISKILL_ASSET_DIR="$ASSETS"
+export MS_ASSET_DIR="$ASSETS"
+export PYTHONNOUSERSITE=1
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export TOKENIZERS_PARALLELISM=false
+cd "$ROOT"
+
+python examples/embodiment/train_embodied_agent.py \
+  --config-path config \
+  --config-name maniskill_ppo_openpi_pi05 \
+  runner.max_epochs=1 runner.max_steps=1 runner.save_interval=1 \
+  runner.logger.log_path=/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke \
+  runner.logger.experiment_name=official_pi05_flow_sde_smoke \
+  rollout.model.model_path="$MODEL" actor.model.model_path="$MODEL" \
+  env.train.total_num_envs=1 env.eval.total_num_envs=1 \
+  env.train.max_episode_steps=5 env.train.max_steps_per_rollout_epoch=5 \
+  env.eval.max_episode_steps=5 env.eval.max_steps_per_rollout_epoch=5 \
+  actor.micro_batch_size=1 actor.global_batch_size=1 \
+  actor.model.openpi.noise_method=flow_sde actor.model.openpi.noise_level=0.5 \
+  actor.model.openpi.joint_logprob=false algorithm.entropy_bonus=0.0

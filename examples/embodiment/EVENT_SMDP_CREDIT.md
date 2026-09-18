@@ -5,8 +5,9 @@ PPO ratio, and PPO loss unchanged. It adds the `event_smdp_interventional`
 advantage estimator only.
 
 Use `maniskill_ppo_openpi_pi05_flow_sde.yaml` as the explicit Flow-SDE π0.5
-starting configuration. It is a derived configuration, not a claim that the
-stock ManiSkill π0.5 PPO configuration already used Flow-SDE.
+πRL baseline; it retains stock GAE and actor-critic PPO. The proposed method
+is the separate `maniskill_ppo_openpi_pi05_event_smdp.yaml` derived config. It
+is not a claim that the stock ManiSkill π0.5 PPO configuration used Flow-SDE.
 
 Before actor advantage calculation, the rollout batch needs sidecar tensors:
 
