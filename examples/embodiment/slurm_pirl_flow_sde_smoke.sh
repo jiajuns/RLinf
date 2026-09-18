@@ -31,12 +31,22 @@ export PYOPENGL_PLATFORM=egl
 export TOKENIZERS_PARALLELISM=false
 cd "$ROOT"
 
+# Defaults are a one-step smoke test.  Override these through sbatch --export
+# for a longer, otherwise identical online πRL run.
+PIRL_MAX_EPOCHS="${PIRL_MAX_EPOCHS:-1}"
+PIRL_MAX_STEPS="${PIRL_MAX_STEPS:-1}"
+PIRL_SAVE_INTERVAL="${PIRL_SAVE_INTERVAL:--1}"
+PIRL_VAL_INTERVAL="${PIRL_VAL_INTERVAL:-10}"
+PIRL_LOG_PATH="${PIRL_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke}"
+PIRL_EXPERIMENT_NAME="${PIRL_EXPERIMENT_NAME:-official_pi05_flow_sde_smoke}"
+
 python examples/embodiment/train_embodied_agent.py \
   --config-path config \
   --config-name maniskill_ppo_openpi_pi05 \
-  runner.max_epochs=1 runner.max_steps=1 runner.save_interval=-1 \
-  runner.logger.log_path=/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke \
-  runner.logger.experiment_name=official_pi05_flow_sde_smoke \
+  runner.max_epochs="$PIRL_MAX_EPOCHS" runner.max_steps="$PIRL_MAX_STEPS" \
+  runner.save_interval="$PIRL_SAVE_INTERVAL" runner.val_check_interval="$PIRL_VAL_INTERVAL" \
+  runner.logger.log_path="$PIRL_LOG_PATH" \
+  runner.logger.experiment_name="$PIRL_EXPERIMENT_NAME" \
   rollout.model.model_path="$MODEL" actor.model.model_path="$MODEL" \
   env.train.total_num_envs=2 env.eval.total_num_envs=1 \
   env.train.max_episode_steps=5 env.train.max_steps_per_rollout_epoch=10 \
