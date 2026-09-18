@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=pirl_fsd_smoke
-#SBATCH --partition=debug
+# acd_ue has the same ACD1 GPU pool as acd_u, but higher scheduling priority.
+# Do not use debug: its per-user GPU QoS is already occupied by another job.
+#SBATCH --partition=acd_ue
+# ACD1-54 passed the same ManiSkill GPU-render probe; ACD1-25 did not.
+#SBATCH --nodelist=ACD1-54
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=00:08:00
+#SBATCH --time=00:12:00
 #SBATCH --output=/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke_%j.out
 #SBATCH --error=/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke_%j.err
 
@@ -21,6 +25,7 @@ export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 export MANISKILL_ASSET_DIR="$ASSETS"
 export MS_ASSET_DIR="$ASSETS"
 export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
 export TOKENIZERS_PARALLELISM=false
@@ -29,13 +34,15 @@ cd "$ROOT"
 python examples/embodiment/train_embodied_agent.py \
   --config-path config \
   --config-name maniskill_ppo_openpi_pi05 \
-  runner.max_epochs=1 runner.max_steps=1 runner.save_interval=1 \
+  runner.max_epochs=1 runner.max_steps=1 runner.save_interval=-1 \
   runner.logger.log_path=/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke \
   runner.logger.experiment_name=official_pi05_flow_sde_smoke \
   rollout.model.model_path="$MODEL" actor.model.model_path="$MODEL" \
-  env.train.total_num_envs=1 env.eval.total_num_envs=1 \
-  env.train.max_episode_steps=5 env.train.max_steps_per_rollout_epoch=5 \
+  env.train.total_num_envs=2 env.eval.total_num_envs=1 \
+  env.train.max_episode_steps=5 env.train.max_steps_per_rollout_epoch=10 \
   env.eval.max_episode_steps=5 env.eval.max_steps_per_rollout_epoch=5 \
-  actor.micro_batch_size=1 actor.global_batch_size=1 \
+  env.train.init_params.sensor_configs.shader_pack=minimal \
+  env.eval.init_params.sensor_configs.shader_pack=minimal \
+  actor.micro_batch_size=1 actor.global_batch_size=2 \
   actor.model.openpi.noise_method=flow_sde actor.model.openpi.noise_level=0.5 \
   actor.model.openpi.joint_logprob=false algorithm.entropy_bonus=0.0
