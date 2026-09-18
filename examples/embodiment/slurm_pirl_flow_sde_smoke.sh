@@ -49,8 +49,12 @@ PIRL_TRAIN_EPISODE_STEPS="${PIRL_TRAIN_EPISODE_STEPS:-5}"
 PIRL_EVAL_EPISODE_STEPS="${PIRL_EVAL_EPISODE_STEPS:-5}"
 PIRL_TRAIN_ROLLOUT_STEPS="${PIRL_TRAIN_ROLLOUT_STEPS:-10}"
 PIRL_EVAL_ROLLOUT_STEPS="${PIRL_EVAL_ROLLOUT_STEPS:-5}"
+PIRL_TRAIN_ROLLOUT_EPOCHS="${PIRL_TRAIN_ROLLOUT_EPOCHS:-1}"
+PIRL_EVAL_ROLLOUT_EPOCHS="${PIRL_EVAL_ROLLOUT_EPOCHS:-1}"
 PIRL_SEED="${PIRL_SEED:-0}"
 PIRL_REWARD_TYPE="${PIRL_REWARD_TYPE:-}"
+PIRL_MICRO_BATCH_SIZE="${PIRL_MICRO_BATCH_SIZE:-1}"
+PIRL_GLOBAL_BATCH_SIZE="${PIRL_GLOBAL_BATCH_SIZE:-2}"
 
 extra_overrides=()
 if [[ -n "$PIRL_REWARD_TYPE" ]]; then
@@ -66,13 +70,14 @@ python examples/embodiment/train_embodied_agent.py \
   runner.logger.experiment_name="$PIRL_EXPERIMENT_NAME" \
   rollout.model.model_path="$MODEL" actor.model.model_path="$MODEL" \
   env.train.total_num_envs="$PIRL_TRAIN_ENVS" env.eval.total_num_envs="$PIRL_EVAL_ENVS" \
+  env.train.rollout_epoch="$PIRL_TRAIN_ROLLOUT_EPOCHS" env.eval.rollout_epoch="$PIRL_EVAL_ROLLOUT_EPOCHS" \
   env.train.max_episode_steps="$PIRL_TRAIN_EPISODE_STEPS" env.train.max_steps_per_rollout_epoch="$PIRL_TRAIN_ROLLOUT_STEPS" \
   env.eval.max_episode_steps="$PIRL_EVAL_EPISODE_STEPS" env.eval.max_steps_per_rollout_epoch="$PIRL_EVAL_ROLLOUT_STEPS" \
   actor.seed="$PIRL_SEED" env.train.seed="$PIRL_SEED" env.eval.seed="$PIRL_SEED" \
   env.train.init_params.sensor_configs.shader_pack=minimal \
   env.eval.init_params.sensor_configs.shader_pack=minimal \
   env.eval.video_cfg.save_video=false \
-  actor.micro_batch_size=1 actor.global_batch_size=2 \
+  actor.micro_batch_size="$PIRL_MICRO_BATCH_SIZE" actor.global_batch_size="$PIRL_GLOBAL_BATCH_SIZE" \
   actor.model.openpi.noise_method=flow_sde actor.model.openpi.noise_level=0.5 \
   actor.model.openpi.joint_logprob=false algorithm.entropy_bonus=0.0 \
   "${extra_overrides[@]}"
