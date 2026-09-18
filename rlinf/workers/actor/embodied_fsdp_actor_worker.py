@@ -305,9 +305,27 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     "event_smdp_temporal currently supports only "
                     "algorithm.event_value_source=pi05_value_proxy."
                 )
-            self.rollout_batch["event_values"] = self.rollout_batch.get("prev_values")
+            pi05_values = self.rollout_batch.get("prev_values")
+            if pi05_values is None or pi05_values.ndim != 3:
+                raise RuntimeError(
+                    "pi05_value_proxy expects prev_values with shape "
+                    "[num_chunks + 1, batch, value_width]."
+                )
+            action_chunk = self.rollout_batch["event_ids"].shape[-1]
+            if pi05_values.shape[-1] == 1 and action_chunk > 1:
+                # π0.5's built-in critic is sampled once per policy chunk,
+                # whereas Oracle Event-SMDP labels every executed action.
+                # Repeat its boundary value within that chunk, retaining the
+                # final boundary value required by the flattened T+1 target.
+                pi05_values = pi05_values.expand(-1, -1, action_chunk).contiguous()
+            elif pi05_values.shape[-1] != action_chunk:
+                raise RuntimeError(
+                    "pi05_value_proxy width must be 1 or match event action "
+                    f"chunk width; got {pi05_values.shape[-1]} and {action_chunk}."
+                )
+            self.rollout_batch["event_values"] = pi05_values
             self.rollout_batch["intervention_influence"] = torch.zeros_like(
-                self.rollout_batch["event_ids"], dtype=self.rollout_batch["prev_values"].dtype
+                self.rollout_batch["event_ids"], dtype=pi05_values.dtype
             )
 
         kwargs = {
