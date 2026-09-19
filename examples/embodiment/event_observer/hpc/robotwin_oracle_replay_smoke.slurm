@@ -27,8 +27,9 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="$LEGACY_EXP"
 export ASSETS_PATH="$ROBOTWIN"
 export PYTHONUNBUFFERED=1
-export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json
-export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
+# Do not override the Vulkan ICD.  SAPIEN selects its compatible bundled ICD
+# on this cluster; forcing /usr/share (which does not exist here) hides the
+# allocated H100 from the renderer.
 mkdir -p "$(dirname "$OUT")" "$ROOT/outputs/robotwin_event_observer"
 cd "$ROBOTWIN"
 python -u "$LEGACY_EXP/collect_robotwin.py" \
