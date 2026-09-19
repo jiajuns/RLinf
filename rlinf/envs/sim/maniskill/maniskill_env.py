@@ -26,6 +26,7 @@ from omegaconf import open_dict
 from omegaconf.omegaconf import OmegaConf
 
 from rlinf.envs.sim.maniskill.utils import allow_pci_render_backend
+from rlinf.envs.sim.maniskill.event_oracle import classify_put_on_event
 
 __all__ = ["ManiskillEnv"]
 
@@ -79,10 +80,17 @@ class ManiskillEnv(gym.Env):
         self.event_oracle_transport_distance = float(
             getattr(event_oracle_cfg, "transport_distance", 0.20)
         )
+        self.event_oracle_approach_distance = float(
+            getattr(event_oracle_cfg, "approach_distance", 0.20)
+        )
+        self.event_oracle_lift_height = float(
+            getattr(event_oracle_cfg, "lift_height", 0.04)
+        )
         self.event_oracle_grasp_steps = int(
             getattr(event_oracle_cfg, "grasp_confirmation_steps", 2)
         )
         self._oracle_previous_event_ids: torch.Tensor | None = None
+        self._oracle_initial_source_z: torch.Tensor | None = None
 
         with open_dict(cfg):
             cfg.init_params.num_envs = num_envs
@@ -296,31 +304,57 @@ class ManiskillEnv(gym.Env):
         if not self.event_oracle_enabled:
             return infos
 
-        device = self.device
-        event_id = torch.full((self.num_envs,), -1, dtype=torch.long, device=device)
-        grasped = infos.get("is_src_obj_grasped")
-        success = infos.get("success")
-        distance = infos.get("carrot_plate_dist")
-        consecutive = infos.get("consecutive_grasp")
-        if grasped is not None:
-            grasped = torch.as_tensor(grasped, device=device, dtype=torch.bool)
-            # 0 approach; 1 grasp confirmation; 2 lift; 3 transport;
-            # 4 align; 5 place/success.  Contiguous runs, not label identity,
-            # define SMDP events downstream.
-            event_id[~grasped] = 0
-            event_id[grasped] = 2
-            if consecutive is not None:
-                confirmed = torch.as_tensor(consecutive, device=device) >= self.event_oracle_grasp_steps
-                event_id[grasped & ~confirmed] = 1
-            if distance is not None:
-                distance = torch.as_tensor(distance, device=device, dtype=torch.float32)
-                event_id[grasped & (distance <= self.event_oracle_transport_distance)] = 3
-                event_id[grasped & (distance <= self.event_oracle_align_distance)] = 4
-        if success is not None:
-            event_id[torch.as_tensor(success, device=device, dtype=torch.bool)] = 5
+        task = self.env.unwrapped
+        grasp_steps = getattr(task, "consecutive_grasp", None)
+        extra_stats = getattr(task, "extra_stats", {})
+        source_position = extra_stats.get("extra_pos_carrot")
+        if grasp_steps is None or source_position is None:
+            raise RuntimeError(
+                "event_oracle requires the PutOnInScene task's current "
+                "consecutive_grasp counter and source pose."
+            )
+        if self._oracle_initial_source_z is None:
+            raise RuntimeError(
+                "event_oracle initial source height is unavailable; reset must "
+                "complete before collecting an oracle-labelled rollout."
+            )
 
-        max_steps = max(int(getattr(self.cfg, "max_episode_steps", 1)), 1)
-        progress = self.elapsed_steps.to(device=device, dtype=torch.float32) / max_steps
+        required_info_keys = (
+            "gripper_carrot_dist",
+            "carrot_plate_dist",
+            "src_on_target",
+            "success",
+        )
+        missing = [key for key in required_info_keys if infos.get(key) is None]
+        if missing:
+            raise RuntimeError(
+                "event_oracle requires current task metrics missing from infos: "
+                + ", ".join(missing)
+            )
+
+        device = self.device
+        source_position = torch.as_tensor(source_position, device=device)
+        grasp_steps = torch.as_tensor(grasp_steps, device=device)
+        event_id, progress = classify_put_on_event(
+            grasp_steps=grasp_steps,
+            source_z=source_position[:, 2].float(),
+            initial_source_z=self._oracle_initial_source_z,
+            gripper_source_distance=torch.as_tensor(
+                infos["gripper_carrot_dist"], device=device, dtype=torch.float32
+            ),
+            source_target_distance=torch.as_tensor(
+                infos["carrot_plate_dist"], device=device, dtype=torch.float32
+            ),
+            source_on_target=torch.as_tensor(
+                infos["src_on_target"], device=device, dtype=torch.bool
+            ),
+            success=torch.as_tensor(infos["success"], device=device, dtype=torch.bool),
+            grasp_confirmation_steps=self.event_oracle_grasp_steps,
+            lift_height=self.event_oracle_lift_height,
+            approach_distance=self.event_oracle_approach_distance,
+            transport_distance=self.event_oracle_transport_distance,
+            align_distance=self.event_oracle_align_distance,
+        )
         if self._oracle_previous_event_ids is None:
             boundary = torch.ones_like(event_id, dtype=torch.bool)
         else:
@@ -330,6 +364,23 @@ class ManiskillEnv(gym.Env):
         infos["oracle_event_progress"] = progress.clamp_(0.0, 1.0)
         infos["oracle_event_boundary"] = boundary
         return infos
+
+    def _refresh_oracle_reset_height(self, env_idx=None) -> None:
+        """Save source-object reset heights for the privileged lift predicate."""
+        if not self.event_oracle_enabled:
+            return
+        source_position = getattr(self.env.unwrapped, "extra_stats", {}).get(
+            "extra_pos_carrot"
+        )
+        if source_position is None:
+            raise RuntimeError(
+                "event_oracle requires extra_pos_carrot after ManiSkill reset."
+            )
+        source_z = torch.as_tensor(source_position, device=self.device)[:, 2].float()
+        if env_idx is None or self._oracle_initial_source_z is None:
+            self._oracle_initial_source_z = source_z.clone()
+        else:
+            self._oracle_initial_source_z[env_idx] = source_z[env_idx]
 
     def reset(
         self,
@@ -352,7 +403,12 @@ class ManiskillEnv(gym.Env):
             self._reset_metrics(env_idx)
         else:
             self._reset_metrics()
-        self._oracle_previous_event_ids = None
+        env_idx = options.get("env_idx")
+        self._refresh_oracle_reset_height(env_idx)
+        if env_idx is None:
+            self._oracle_previous_event_ids = None
+        elif self._oracle_previous_event_ids is not None:
+            self._oracle_previous_event_ids[env_idx] = -1
         infos = self._attach_oracle_event_info(infos)
         return extracted_obs, infos
 
