@@ -31,6 +31,13 @@ export PYTHONNOUSERSITE=1
 export PYTHONUNBUFFERED=1
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
+# SAPIEN otherwise guesses an incomplete system ICD on several ACD hosts.
+# Pin the ICD shipped with the same Python environment as ManiSkill; this is
+# required before Ray forks its EnvWorker process, not after it has crashed.
+SAPIEN_ICD=/data/user/leviccdong/EKSF/env_pirl_pi05/lib/python3.10/site-packages/sapien/vulkan_library/nvidia_icd.json
+test -f "$SAPIEN_ICD"
+export VK_DRIVER_FILES="$SAPIEN_ICD"
+export VK_ICD_FILENAMES="$SAPIEN_ICD"
 export TOKENIZERS_PARALLELISM=false
 cd "$ROOT"
 
