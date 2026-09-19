@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize paired RobotWin RGB/oracle-event episodes for Event Observer training.
+"""Materialize paired RobotWin RGB/proprio/oracle-event episodes.
 
 The official RobotWin archives remain the authoritative RGB source.  A paired
 ``collect_robotwin.py --scene-backend renderer --replay-archive ...`` sidecar
@@ -7,10 +7,10 @@ is the authoritative source of privileged event labels.  This tool refuses to
 materialize a label file without its replay provenance, so visual samples can
 never silently be paired with a different expert trajectory.
 
-The resulting HDF5 contains no privileged scene state: only JPEG camera frames,
-camera calibration, actions, and the training labels ``event_target``,
-``event_boundary`` and ``event_progress``.  Privileged quantities stay in the
-input sidecar and are never copied into observer inputs.
+The resulting HDF5 contains only deployment-time inputs: JPEG camera frames and
+post-physics robot proprioception read back during replay.  It does not copy
+camera extrinsics, object state, depth, oracle segmentation, contact state, or
+actions.  The oracle event targets remain labels, never observer inputs.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import h5py
 import numpy as np
 
 
-FORMAT = "robotwin_rgb_oracle_event_observer_v1"
+FORMAT = "robotwin_rgb_proprio_oracle_event_observer_v2"
 EVENT_NAMES = (
     "approach",
     "grasp",
@@ -42,8 +42,62 @@ EVENT_NAMES = (
     "activate",
     "idle",
 )
-CAMERAS = ("left_camera", "right_camera", "head_camera", "front_camera")
 ARCHIVE_HASH_CACHE: dict[Path, str] = {}
+
+
+def discover_cameras(source: h5py.File) -> tuple[str, ...]:
+    """Return available RGB cameras in a stable role-first order.
+
+    RoboTwin archives do not promise a ``front_camera``.  Camera names are
+    therefore discovered from the recorded HDF5 rather than inferred from an
+    embodiment convention.  The three names below are ordered first because
+    they identify the two wrist views and the fixed global view when present.
+    """
+    observation = source.get("observation")
+    if not isinstance(observation, h5py.Group):
+        raise ValueError("official episode has no observation group")
+    available = [
+        name
+        for name, group in observation.items()
+        if isinstance(group, h5py.Group) and "rgb" in group
+    ]
+    preferred = ("left_camera", "right_camera", "head_camera")
+    ordered = [name for name in preferred if name in available]
+    ordered.extend(sorted(name for name in available if name not in ordered))
+    if not ordered:
+        raise ValueError("official episode has no RGB camera stream")
+    return tuple(ordered)
+
+
+def replay_proprio(ee_state16: np.ndarray, sim_times: np.ndarray) -> dict[str, np.ndarray]:
+    """Split replay-readback state into causal deployment-time proprioception.
+
+    ``ee_state16`` is captured *after physics stepping* by the replay
+    collector.  Its layout is left pose (7), left gripper, right pose (7), and
+    right gripper.  Velocities are one-sided finite differences, so no feature
+    at time ``t`` reads a future state.
+    """
+    state = np.asarray(ee_state16, dtype=np.float32)
+    times = np.asarray(sim_times, dtype=np.float64)
+    if state.ndim != 2 or state.shape[1] != 16 or len(state) != len(times):
+        raise ValueError("replay ee_state16 must have shape [T,16] aligned to sim_times")
+    if len(times) < 2 or not np.isfinite(state).all() or not np.isfinite(times).all():
+        raise ValueError("replay proprioception must be finite and contain two frames")
+    delta_t = np.diff(times)
+    if np.any(delta_t <= 0):
+        raise ValueError("replay sim_times must be strictly increasing")
+    poses = np.stack((state[:, :7], state[:, 8:15]), axis=1)
+    opening = np.stack((state[:, 7], state[:, 15]), axis=1)
+    linear_velocity = np.zeros((len(state), 2, 3), dtype=np.float32)
+    linear_velocity[1:] = np.diff(poses[:, :, :3], axis=0) / delta_t[:, None, None]
+    # Quaternion conversion is deliberately left to a validated embodiment
+    # adapter.  Storing poses lets the adapter compute angular velocity in its
+    # documented convention instead of assuming a quaternion layout here.
+    return {
+        "ee_pose7": poses,
+        "gripper_opening_raw": opening,
+        "ee_linear_velocity": linear_velocity,
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -121,6 +175,11 @@ def read_label(path: Path, require_success: bool) -> dict[str, Any]:
         if events.shape[1:] != (len(EVENT_NAMES),):
             raise ValueError(f"unsupported events shape {events.shape}")
         sim_times = np.asarray(handle["sim_times"], dtype=np.float64)
+        if "ee_state16" not in handle:
+            raise ValueError(
+                "replay sidecar lacks ee_state16; rerun with post-physics proprioception capture"
+            )
+        proprio = replay_proprio(np.asarray(handle["ee_state16"]), sim_times)
         return {
             "archive": archive,
             "archive_sha256": str(handle.attrs.get("replay_archive_sha256", "")),
@@ -128,6 +187,7 @@ def read_label(path: Path, require_success: bool) -> dict[str, Any]:
             "events": events,
             "sim_times": sim_times,
             "actions14": np.asarray(handle["actions14"], dtype=np.float32),
+            "proprio": proprio,
             "task": str(handle.attrs["task"]),
             "body": str(handle.attrs["body"]),
             "condition": str(handle.attrs["condition"]),
@@ -151,7 +211,8 @@ def create_episode(label_path: Path, output_root: Path, require_success: bool) -
     with zipfile.ZipFile(archive_path) as archive:
         member = source_hdf5_member(archive, label["replay_index"])
         with h5py.File(io.BytesIO(archive.read(member)), "r") as source:
-            first_camera = source[f"observation/{CAMERAS[0]}/rgb"]
+            cameras = discover_cameras(source)
+            first_camera = source[f"observation/{cameras[0]}/rgb"]
             frame_index = alignment_indices(label["sim_times"], len(first_camera))
             if label["actions14"].shape != (len(frame_index) - 1, 14):
                 raise ValueError("oracle action length does not match oracle labels")
@@ -162,7 +223,7 @@ def create_episode(label_path: Path, output_root: Path, require_success: bool) -
                 with h5py.File(temporary, "w") as target:
                     jpeg_type = h5py.vlen_dtype(np.dtype("uint8"))
                     rgb_group = target.create_group("rgb")
-                    for camera in CAMERAS:
+                    for camera in cameras:
                         camera_group = source[f"observation/{camera}"]
                         rgb = camera_group["rgb"]
                         if len(rgb) != len(first_camera):
@@ -170,19 +231,16 @@ def create_episode(label_path: Path, output_root: Path, require_success: bool) -
                         output = rgb_group.create_dataset(camera, (len(frame_index),), dtype=jpeg_type)
                         for offset, source_index in enumerate(frame_index):
                             output[offset] = np.frombuffer(bytes(rgb[int(source_index)]), dtype=np.uint8)
-                        for key in ("intrinsic_cv", "extrinsic_cv", "cam2world_gl"):
-                            target.create_dataset(
-                                f"camera/{camera}/{key}",
-                                data=np.asarray(camera_group[key])[frame_index],
-                                compression="gzip",
-                                compression_opts=1,
-                            )
+                    proprio_group = target.create_group("proprio")
+                    for key, value in label["proprio"].items():
+                        proprio_group.create_dataset(
+                            key, data=value, compression="gzip", compression_opts=1
+                        )
                     boundary, progress = event_boundary_and_progress(label["events"])
                     target.create_dataset("frame_index", data=frame_index)
                     target.create_dataset("event_target", data=label["events"], compression="gzip", compression_opts=1)
                     target.create_dataset("event_boundary", data=boundary)
                     target.create_dataset("event_progress", data=progress)
-                    target.create_dataset("actions14", data=label["actions14"], compression="gzip", compression_opts=1)
                     target.attrs.update({
                         "format": FORMAT,
                         "task": label["task"], "body": label["body"],
@@ -195,6 +253,13 @@ def create_episode(label_path: Path, output_root: Path, require_success: bool) -
                         "oracle_sidecar": str(label_path),
                         "oracle_sidecar_sha256": sha256_file(label_path),
                         "event_names_json": json.dumps(EVENT_NAMES),
+                        "camera_names_json": json.dumps(cameras),
+                        "proprio_source": "post_physics_replay_readback",
+                        "forbidden_observer_inputs_json": json.dumps([
+                            "actions14", "camera_extrinsics", "camera_intrinsics",
+                            "depth", "oracle_segmentation", "object_pose",
+                            "contact", "oracle_event_target",
+                        ]),
                     })
                 os.replace(temporary, destination)
             finally:
