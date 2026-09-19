@@ -83,7 +83,8 @@ fi
 placement_overrides=()
 if [[ -n "$PIRL_ENV_GPU" ]]; then
   placement_overrides+=(
-    "++cluster.component_placement={actor: 0, rollout: 0, env: ${PIRL_ENV_GPU}}"
+    "~cluster.component_placement"
+    "+cluster.component_placement={actor: 0, rollout: 0, env: ${PIRL_ENV_GPU}}"
   )
 fi
 
