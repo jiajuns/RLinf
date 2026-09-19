@@ -75,25 +75,24 @@ def init_state_compat(**kwargs):
 predictor.model.init_state = init_state_compat
 session = predictor.handle_request({"type": "start_session", "resource_path": frames})
 session_id = session["session_id"]
-# One proposal only.  It is converted to a visual box anchor before tracking.
+# One proposal only.  In this pinned multiplex API, a subsequent standalone
+# box request resets text grounding and produces an empty stream.  Keeping the
+# one frame-0 grounding request in the session is the supported anchor mode;
+# it is never issued again on later frames.
 proposal = predictor.handle_request({
     "type": "add_prompt", "session_id": session_id, "frame_index": 0, "text": anchor_prompt,
 })["outputs"]
 probs = np.asarray(proposal["out_probs"], dtype=np.float32)
-boxes = np.asarray(proposal["out_boxes_xywh"], dtype=np.float32)
 if len(probs) == 0:
     raise RuntimeError("SAM 3.1 found no frame-0 object for the single anchor prompt")
-anchor = boxes[int(np.argmax(probs))][None, :]
-predictor.handle_request({
-    "type": "add_prompt", "session_id": session_id, "frame_index": 0,
-    "bounding_boxes": anchor, "bounding_box_labels": [1],
-})
 outputs = []
 for response in predictor.handle_stream_request({"type": "propagate_in_video", "session_id": session_id}):
     out = response["outputs"]
     outputs.append((response["frame_index"], out["out_probs"], out["out_boxes_xywh"], out["out_binary_masks"]))
 if len(outputs) != 4:
     raise RuntimeError(f"expected 4 propagated frames, received {len(outputs)}")
+if not any(len(item[1]) for item in outputs):
+    raise RuntimeError("SAM 3.1 propagation returned no tracked candidates")
 np.savez_compressed(
     result,
     frame_index=np.asarray([item[0] for item in outputs], dtype=np.int64),
