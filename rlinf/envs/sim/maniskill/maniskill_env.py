@@ -87,7 +87,10 @@ class ManiskillEnv(gym.Env):
             getattr(event_oracle_cfg, "lift_height", 0.04)
         )
         self.event_oracle_grasp_steps = int(
-            getattr(event_oracle_cfg, "grasp_confirmation_steps", 2)
+            # PutOnInScene itself defines a stable grasp as five consecutive
+            # current-state grasp detections; use the same calibrated task
+            # criterion unless an audited task-specific override is supplied.
+            getattr(event_oracle_cfg, "grasp_confirmation_steps", 5)
         )
         self._oracle_previous_event_ids: torch.Tensor | None = None
         self._oracle_initial_source_z: torch.Tensor | None = None

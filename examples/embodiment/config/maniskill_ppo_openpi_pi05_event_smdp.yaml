@@ -87,7 +87,9 @@ env:
       transport_distance: 0.20
       approach_distance: 0.20
       lift_height: 0.04
-      grasp_confirmation_steps: 2
+      # Matches PutOnInScene's native stable-grasp criterion rather than a
+      # heuristic episode statistic.
+      grasp_confirmation_steps: 5
   eval:
     rollout_epoch: 1
     total_num_envs: 320
