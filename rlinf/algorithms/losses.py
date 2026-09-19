@@ -346,6 +346,21 @@ def compute_ppo_critic_loss(
     Returns:
         Tuple[torch.Tensor, Dict]: (critic_loss, metrics_dict)
     """
+    # π0.5 emits one value at a policy-chunk boundary while action-level
+    # credit supplies one return per executed action.  Arithmetic broadcasts a
+    # [B, 1] value tensor correctly, but boolean masking in the explained
+    # variance path does not broadcast.  Materialize the common action-level
+    # shape once so critic loss, clipping, and metrics use the same samples for
+    # every micro-batch size.
+    target_shape = torch.broadcast_shapes(returns.shape, values.shape)
+    returns = torch.broadcast_to(returns, target_shape)
+    values = torch.broadcast_to(values, target_shape)
+    prev_values = torch.broadcast_to(prev_values, target_shape)
+    if loss_mask is not None:
+        loss_mask = torch.broadcast_to(loss_mask, target_shape)
+    if loss_mask_sum is not None:
+        loss_mask_sum = torch.broadcast_to(loss_mask_sum, target_shape)
+
     loss_mask_ratio = None
     loss_agg_func = masked_mean
 
