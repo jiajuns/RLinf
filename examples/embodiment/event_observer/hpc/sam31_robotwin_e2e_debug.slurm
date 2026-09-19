@@ -26,18 +26,23 @@ test -f "$CHECKPOINT"
 mkdir -p "$FRAMES" "$ROOT/outputs"
 trap 'rm -rf "$FRAMES"' EXIT
 
+# This archive's left wrist starts with no moving object in view.  The right
+# wrist has a clear moving-object view; the head view is reserved for the
+# later object--target relation stream.
+CAMERA=right_camera
+ANCHOR_PROMPT="blue jar"
 # Decode four cached RGB-only wrist frames with the replay/materialization env.
 source /share/anaconda3/bin/activate
 conda activate "$ROOT/env_etsf"
-python - "$EPISODE" "$FRAMES" <<'PY'
+python - "$EPISODE" "$FRAMES" "$CAMERA" <<'PY'
 import io
 import sys
 import h5py
 from PIL import Image
 
-episode, out_dir = sys.argv[1:]
+episode, out_dir, camera = sys.argv[1:]
 with h5py.File(episode, "r") as handle:
-    frames = handle["rgb/left_camera"]
+    frames = handle[f"rgb/{camera}"]
     for index in range(4):
         encoded = bytes(frames[index])
         image = Image.open(io.BytesIO(encoded)).convert("RGB")
@@ -48,13 +53,13 @@ conda deactivate
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="$SAM_SOURCE:$SAM_SITE"
 export PYTHONUNBUFFERED=1
-"$SAM_PYTHON" - "$FRAMES" "$CHECKPOINT" "$RESULT" <<'PY'
+"$SAM_PYTHON" - "$FRAMES" "$CHECKPOINT" "$RESULT" "$ANCHOR_PROMPT" <<'PY'
 import sys
 import numpy as np
 import torch
 from sam3.model_builder import build_sam3_multiplex_video_predictor
 
-frames, checkpoint, result = sys.argv[1:]
+frames, checkpoint, result, anchor_prompt = sys.argv[1:]
 assert torch.cuda.is_available(), "allocated GPU is required"
 predictor = build_sam3_multiplex_video_predictor(
     checkpoint_path=checkpoint, use_fa3=False, compile=False,
@@ -72,7 +77,7 @@ session = predictor.handle_request({"type": "start_session", "resource_path": fr
 session_id = session["session_id"]
 # One proposal only.  It is converted to a visual box anchor before tracking.
 proposal = predictor.handle_request({
-    "type": "add_prompt", "session_id": session_id, "frame_index": 0, "text": "can",
+    "type": "add_prompt", "session_id": session_id, "frame_index": 0, "text": anchor_prompt,
 })["outputs"]
 probs = np.asarray(proposal["out_probs"], dtype=np.float32)
 boxes = np.asarray(proposal["out_boxes_xywh"], dtype=np.float32)
