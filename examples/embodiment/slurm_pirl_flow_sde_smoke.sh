@@ -74,6 +74,11 @@ PIRL_GLOBAL_BATCH_SIZE="${PIRL_GLOBAL_BATCH_SIZE:-2}"
 # prevents SAPIEN camera buffers from competing with the two π0.5 copies.
 # Empty keeps the original official colocated placement.
 PIRL_ENV_GPU="${PIRL_ENV_GPU:-}"
+# ManiSkill supports a CPU rendering backend while retaining GPU physics.  It
+# is a compatibility fallback for hosts whose Vulkan device resets during
+# batched CUDA-camera allocation; it keeps the same RGB+segmentation
+# observation, but is intentionally benchmarked for throughput before use.
+PIRL_RENDER_BACKEND="${PIRL_RENDER_BACKEND:-}"
 
 extra_overrides=()
 if [[ -n "$PIRL_REWARD_TYPE" ]]; then
@@ -85,6 +90,14 @@ if [[ -n "$PIRL_ENV_GPU" ]]; then
   placement_overrides+=(
     "~cluster.component_placement"
     "+cluster.component_placement={actor: 0, rollout: 0, env: ${PIRL_ENV_GPU}}"
+  )
+fi
+
+render_overrides=()
+if [[ -n "$PIRL_RENDER_BACKEND" ]]; then
+  render_overrides+=(
+    "+env.train.init_params.render_backend=${PIRL_RENDER_BACKEND}"
+    "+env.eval.init_params.render_backend=${PIRL_RENDER_BACKEND}"
   )
 fi
 
@@ -111,4 +124,5 @@ python examples/embodiment/train_embodied_agent.py \
   algorithm.adv_type=gae algorithm.loss_type=actor_critic algorithm.reward_type=action_level \
   env.train.event_oracle.enabled=false \
   "${placement_overrides[@]}" \
+  "${render_overrides[@]}" \
   "${extra_overrides[@]}"
