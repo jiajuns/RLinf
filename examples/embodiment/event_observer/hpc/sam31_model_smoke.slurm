@@ -43,6 +43,5 @@ predictor = build_sam3_multiplex_video_predictor(
     warm_up=False,
     async_loading_frames=False,
 )
-predictor.eval()
 print("sam31_model_build_ok", type(predictor).__name__)
 PY
