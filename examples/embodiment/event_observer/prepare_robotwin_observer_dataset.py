@@ -29,7 +29,7 @@ import h5py
 import numpy as np
 
 
-FORMAT = "robotwin_rgb_proprio_oracle_event_observer_v2"
+FORMAT = "robotwin_rgb_proprio_oracle_event_observer_v3_general_roles"
 GEOMETRIC_RELATION_PRIMITIVES = (
     "approaching", "contact", "attached", "co_moving", "constrained_motion",
     "aligned", "inside_or_on_target", "released",
