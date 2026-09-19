@@ -60,6 +60,14 @@ predictor = build_sam3_multiplex_video_predictor(
     checkpoint_path=checkpoint, use_fa3=False, compile=False,
     warm_up=False, async_loading_frames=False,
 )
+# The public base predictor forwards this legacy keyword, while the multiplex
+# tracker in the pinned SAM 3.1 source does not accept it.  It is a CPU
+# offload flag and has no semantic effect in this single-GPU job.
+init_state = predictor.model.init_state
+def init_state_compat(**kwargs):
+    kwargs.pop("offload_state_to_cpu", None)
+    return init_state(**kwargs)
+predictor.model.init_state = init_state_compat
 session = predictor.handle_request({"type": "start_session", "resource_path": frames})
 session_id = session["session_id"]
 # One proposal only.  It is converted to a visual box anchor before tracking.
