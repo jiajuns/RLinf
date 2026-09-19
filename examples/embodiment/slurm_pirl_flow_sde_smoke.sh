@@ -50,9 +50,12 @@ PIRL_SAVE_INTERVAL="${PIRL_SAVE_INTERVAL:--1}"
 PIRL_VAL_INTERVAL="${PIRL_VAL_INTERVAL:-10}"
 PIRL_LOG_PATH="${PIRL_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/pirl_flow_sde_smoke}"
 PIRL_EXPERIMENT_NAME="${PIRL_EXPERIMENT_NAME:-official_pi05_flow_sde_smoke}"
-# Keep the audited baseline default, while allowing a separate, explicit
-# Event-SMDP smoke submission without editing this shared launcher.
-PIRL_CONFIG_NAME="${PIRL_CONFIG_NAME:-maniskill_ppo_openpi_pi05_flow_sde}"
+# The historical Flow-SDE overlay nested the stock π0.5 root, whose Hydra
+# searchpath is legal only for a primary config.  Reuse the primary Event-SMDP
+# config as a schema carrier, then explicitly disable every event-only path
+# below; this leaves the official action-level GAE/PPO baseline as the only
+# active credit estimator.
+PIRL_CONFIG_NAME="${PIRL_CONFIG_NAME:-maniskill_ppo_openpi_pi05_event_smdp}"
 PIRL_TRAIN_ENVS="${PIRL_TRAIN_ENVS:-2}"
 PIRL_EVAL_ENVS="${PIRL_EVAL_ENVS:-1}"
 PIRL_TRAIN_EPISODE_STEPS="${PIRL_TRAIN_EPISODE_STEPS:-5}"
@@ -90,4 +93,6 @@ python examples/embodiment/train_embodied_agent.py \
   actor.micro_batch_size="$PIRL_MICRO_BATCH_SIZE" actor.global_batch_size="$PIRL_GLOBAL_BATCH_SIZE" \
   actor.model.openpi.noise_method=flow_sde actor.model.openpi.noise_level=0.5 \
   actor.model.openpi.joint_logprob=false algorithm.entropy_bonus=0.0 \
+  algorithm.adv_type=gae algorithm.loss_type=actor_critic algorithm.reward_type=action_level \
+  env.train.event_oracle.enabled=false \
   "${extra_overrides[@]}"
