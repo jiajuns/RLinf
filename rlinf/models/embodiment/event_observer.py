@@ -1,4 +1,4 @@
-"""Causal Event Observer and Event Value Critic sidecar modules.
+"""Task-general causal Event Observer and Event Value Critic sidecars.
 
 These modules consume only cached visual geometry/tracking features and
 deployment-time proprioception.  SAM-derived masks are produced offline by a
@@ -21,6 +21,8 @@ class EventObserverPrediction:
 
     representation: torch.Tensor
     posterior_logits: torch.Tensor
+    geometric_relation_logits: torch.Tensor
+    state_change_logits: torch.Tensor
     state_logits: torch.Tensor
     boundary_logits: torch.Tensor
     progress: torch.Tensor
@@ -28,11 +30,13 @@ class EventObserverPrediction:
 
 
 class EventObserver(nn.Module):
-    """Predict event state from causal visual geometry and proprioception.
+    """Predict shared relation primitives before a task-general event state.
 
     The GRU is intentionally unidirectional: output at timestep ``t`` is not
     allowed to consume future frames.  ``mount_tokens`` distinguishes wrist
     and global-camera feature bundles without exposing embodiment identifiers.
+    Task/archetype IDs are deliberately absent: only cached role-pair features,
+    role types, and deployment-time proprioception may condition this module.
     """
 
     def __init__(
@@ -43,10 +47,16 @@ class EventObserver(nn.Module):
         *,
         hidden_dim: int = 256,
         num_mount_tokens: int = 3,
+        num_geometric_primitives: int | None = None,
+        num_state_change_primitives: int = 1,
     ) -> None:
         super().__init__()
         if min(feature_dim, num_event_posteriors, num_smdp_states, hidden_dim, num_mount_tokens) < 1:
             raise ValueError("EventObserver dimensions must be positive")
+        if num_geometric_primitives is None:
+            num_geometric_primitives = num_event_posteriors
+        if num_geometric_primitives < 1 or num_state_change_primitives < 0:
+            raise ValueError("relation primitive dimensions must be non-negative")
         self.feature_dim = feature_dim
         self.input_projection = nn.Sequential(
             nn.LayerNorm(feature_dim),
@@ -56,6 +66,8 @@ class EventObserver(nn.Module):
         self.mount_embedding = nn.Embedding(num_mount_tokens, hidden_dim)
         self.temporal = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
         self.posterior_head = nn.Linear(hidden_dim, num_event_posteriors)
+        self.geometric_relation_head = nn.Linear(hidden_dim, num_geometric_primitives)
+        self.state_change_head = nn.Linear(hidden_dim, num_state_change_primitives)
         self.state_head = nn.Linear(hidden_dim, num_smdp_states)
         self.boundary_head = nn.Linear(hidden_dim, 1)
         self.progress_head = nn.Linear(hidden_dim, 1)
@@ -80,6 +92,8 @@ class EventObserver(nn.Module):
         return EventObserverPrediction(
             representation=representation,
             posterior_logits=self.posterior_head(representation),
+            geometric_relation_logits=self.geometric_relation_head(representation),
+            state_change_logits=self.state_change_head(representation),
             state_logits=self.state_head(representation),
             boundary_logits=self.boundary_head(representation).squeeze(-1),
             progress=torch.sigmoid(self.progress_head(representation).squeeze(-1)),
@@ -115,6 +129,8 @@ def event_observer_supervision_loss(
     state_target: torch.Tensor,
     boundary_target: torch.Tensor,
     progress_target: torch.Tensor,
+    geometric_relation_target: torch.Tensor | None = None,
+    state_change_target: torch.Tensor | None = None,
     valid_mask: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Compute masked posterior, state, boundary, and uncertainty-aware progress losses."""
@@ -143,9 +159,20 @@ def event_observer_supervision_loss(
     )
     squared_error = (prediction.progress - progress_target.to(prediction.progress.dtype)).square()
     progress = 0.5 * (squared_error / prediction.uncertainty + prediction.uncertainty.log())
-    return {
+    losses = {
         "posterior": (posterior * mask).sum() / denominator,
         "state": (state * mask).sum() / denominator,
         "boundary": (boundary * mask).sum() / denominator,
         "progress": (progress * mask).sum() / denominator,
     }
+    for name, logits, target in (
+        ("geometric_relations", prediction.geometric_relation_logits, geometric_relation_target),
+        ("state_changes", prediction.state_change_logits, state_change_target),
+    ):
+        if target is None:
+            continue
+        if target.shape != logits.shape:
+            raise ValueError(f"{name} target shape must match its relation head")
+        per_frame = F.binary_cross_entropy_with_logits(logits, target.to(logits.dtype), reduction="none")
+        losses[name] = (per_frame.mean(dim=-1) * mask).sum() / denominator
+    return losses

@@ -81,3 +81,19 @@ def test_canonical_event_targets_are_exclusive_except_release() -> None:
         "place",
     ]
     assert targets[5, names.index("release")] == 1.0
+
+
+def test_general_roles_and_shared_primitives_do_not_require_task_id() -> None:
+    """Role and primitive labels are derived from roster/relations, not task class."""
+    roster = '[{"name":"moving","type":"object"},{"name":"target","type":"object"},{"name":"left","type":"left_gripper"}]'
+    relations = np.zeros((2, len(_MODULE.RELATION_NAMES), 8, 8), dtype=np.float32)
+    held = _MODULE.RELATION_NAMES.index("held_by")
+    inside = _MODULE.RELATION_NAMES.index("inside")
+    relations[:, held, 0, 2] = 1.0
+    relations[1, inside, 0, 1] = 1.0
+    geometric, state_change = _MODULE.shared_relation_targets(relations, roster)
+    assert _MODULE.general_role_bindings(roster)[0]["role"] == "manipulated_object"
+    assert geometric.shape == (2, len(_MODULE.GEOMETRIC_RELATION_PRIMITIVES))
+    assert state_change.shape == (2, len(_MODULE.STATE_CHANGE_PRIMITIVES))
+    assert geometric[:, _MODULE.GEOMETRIC_RELATION_PRIMITIVES.index("attached")].all()
+    assert geometric[1, _MODULE.GEOMETRIC_RELATION_PRIMITIVES.index("inside_or_on_target")] == 1.0

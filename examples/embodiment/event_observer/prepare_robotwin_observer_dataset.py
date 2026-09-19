@@ -30,6 +30,11 @@ import numpy as np
 
 
 FORMAT = "robotwin_rgb_proprio_oracle_event_observer_v2"
+GEOMETRIC_RELATION_PRIMITIVES = (
+    "approaching", "contact", "attached", "co_moving", "constrained_motion",
+    "aligned", "inside_or_on_target", "released",
+)
+STATE_CHANGE_PRIMITIVES = ("articulating", "actuated")
 EVENT_NAMES = (
     "approach",
     "grasp",
@@ -243,6 +248,71 @@ def canonical_event_targets(
     return target_values, state
 
 
+def general_role_bindings(roster_json: str) -> list[dict[str, str | int]]:
+    """Map replay roster entries to task-general roles for offline binding only.
+
+    These role types are metadata for SAM anchor construction and dynamic-graph
+    cache building.  They are not task IDs and cannot be fed to relation heads.
+    """
+    bindings: list[dict[str, str | int]] = []
+    for index, item in enumerate(json.loads(roster_json)):
+        name = str(item.get("name", ""))
+        node_type = str(item.get("type", ""))
+        lowered = name.lower()
+        if name == "moving":
+            role = "manipulated_object"
+        elif name == "target":
+            role = "goal_region"
+        elif node_type in {"left_gripper", "right_gripper"}:
+            role = "gripper"
+        elif "tool" in lowered:
+            role = "tool"
+        elif any(token in lowered for token in ("handle", "knob", "button", "switch", "faucet")):
+            role = "handle_or_actuator"
+        else:
+            role = "articulated_part"
+        bindings.append({"slot": index, "name": name, "role": role})
+    return bindings
+
+
+def shared_relation_targets(
+    relations: np.ndarray, roster_json: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Derive task-general primitive labels from oracle relations only.
+
+    This label adapter never writes oracle geometry into observer features.
+    ``approaching`` and ``constrained_motion`` are intentionally left unknown
+    (zero with a later validity mask) until task-specific replay adapters expose
+    validated oracle definitions; fabricating them would create false supervision.
+    """
+    values = np.asarray(relations, dtype=np.float32)
+    roster = json.loads(roster_json)
+    index = {str(item["name"]): offset for offset, item in enumerate(roster)}
+    relation = {name: values[:, offset] >= 0.5 for offset, name in enumerate(RELATION_NAMES)}
+    moving, target = index.get("moving"), index.get("target")
+    grippers = [offset for offset, item in enumerate(roster) if str(item.get("type")) in {"left_gripper", "right_gripper"}]
+    count = len(values)
+    geometric = np.zeros((count, len(GEOMETRIC_RELATION_PRIMITIVES)), dtype=np.float32)
+    state_change = np.zeros((count, len(STATE_CHANGE_PRIMITIVES)), dtype=np.float32)
+    if moving is not None:
+        held = relation["held_by"][:, moving, grippers].any(axis=1) if grippers else np.zeros(count, bool)
+        released = relation["released"][:, moving, moving]
+        geometric[:, 1] = held.astype(np.float32)  # contact proxy, explicitly oracle label only
+        geometric[:, 2] = held.astype(np.float32)
+        geometric[:, 3] = held.astype(np.float32)
+        geometric[:, 7] = released.astype(np.float32)
+        if target is not None:
+            geometric[:, 5] = relation["near"][:, moving, target]
+            geometric[:, 6] = (
+                relation["inside"][:, moving, target]
+                | relation["on_top_of"][:, moving, target]
+                | relation["supported_by"][:, moving, target]
+            )
+    state_change[:, 0] = relation["activated"].any(axis=(1, 2)) | relation["pressed"].any(axis=(1, 2))
+    state_change[:, 1] = state_change[:, 0]
+    return geometric, state_change
+
+
 def read_label(path: Path, require_success: bool) -> dict[str, Any]:
     """Read only label fields and validate that the source is an official replay."""
     with h5py.File(path, "r") as handle:
@@ -262,18 +332,24 @@ def read_label(path: Path, require_success: bool) -> dict[str, Any]:
         for name in ("relations", "node_features", "success"):
             if name not in handle:
                 raise ValueError(f"replay sidecar lacks oracle label source {name}")
+        relations = np.asarray(handle["relations"])
+        roster_json = str(handle.attrs.get("node_roster_json", ""))
         event_target, event_state_id = canonical_event_targets(
-            np.asarray(handle["relations"]),
+            relations,
             np.asarray(handle["node_features"]),
             np.asarray(handle["success"]),
-            str(handle.attrs.get("node_roster_json", "")),
+            roster_json,
         )
+        geometric_relation_target, state_change_target = shared_relation_targets(relations, roster_json)
         return {
             "archive": archive,
             "archive_sha256": str(handle.attrs.get("replay_archive_sha256", "")),
             "replay_index": replay_index,
             "event_target": event_target,
             "event_state_id": event_state_id,
+            "geometric_relation_target": geometric_relation_target,
+            "state_change_target": state_change_target,
+            "role_bindings": general_role_bindings(roster_json),
             "sim_times": sim_times,
             "actions14": np.asarray(handle["actions14"], dtype=np.float32),
             "proprio": proprio,
@@ -331,6 +407,8 @@ def create_episode(label_path: Path, output_root: Path, require_success: bool) -
                     target.create_dataset("event_state_id", data=label["event_state_id"])
                     target.create_dataset("event_boundary", data=boundary)
                     target.create_dataset("event_progress", data=progress)
+                    target.create_dataset("geometric_relation_target", data=label["geometric_relation_target"], compression="gzip", compression_opts=1)
+                    target.create_dataset("state_change_target", data=label["state_change_target"], compression="gzip", compression_opts=1)
                     target.attrs.update({
                         "format": FORMAT,
                         "task": label["task"], "body": label["body"],
@@ -343,6 +421,9 @@ def create_episode(label_path: Path, output_root: Path, require_success: bool) -
                         "oracle_sidecar": str(label_path),
                         "oracle_sidecar_sha256": sha256_file(label_path),
                         "event_names_json": json.dumps(EVENT_NAMES),
+                        "geometric_relation_primitives_json": json.dumps(GEOMETRIC_RELATION_PRIMITIVES),
+                        "state_change_primitives_json": json.dumps(STATE_CHANGE_PRIMITIVES),
+                        "role_bindings_json": json.dumps(label["role_bindings"]),
                         "camera_names_json": json.dumps(cameras),
                         "proprio_source": "post_physics_replay_readback",
                         "forbidden_observer_inputs_json": json.dumps([

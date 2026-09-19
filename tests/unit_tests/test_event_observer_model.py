@@ -38,3 +38,17 @@ def test_event_observer_supervision_masks_missing_tracks() -> None:
     losses = event_observer_supervision_loss(prediction, **kwargs)
     assert set(losses) == {"posterior", "state", "boundary", "progress"}
     assert all(bool(torch.isfinite(value)) for value in losses.values())
+
+
+def test_relation_heads_are_separate_from_task_general_event_state() -> None:
+    observer = EventObserver(4, 5, 3, hidden_dim=8, num_geometric_primitives=3, num_state_change_primitives=2)
+    prediction = observer(torch.randn(1, 2, 4))
+    assert prediction.geometric_relation_logits.shape == (1, 2, 3)
+    assert prediction.state_change_logits.shape == (1, 2, 2)
+    losses = event_observer_supervision_loss(
+        prediction,
+        posterior_target=torch.zeros(1, 2, 5), state_target=torch.zeros(1, 2, dtype=torch.long),
+        boundary_target=torch.zeros(1, 2), progress_target=torch.zeros(1, 2),
+        geometric_relation_target=torch.zeros(1, 2, 3), state_change_target=torch.zeros(1, 2, 2),
+    )
+    assert {"geometric_relations", "state_changes"}.issubset(losses)
