@@ -33,14 +33,27 @@ FORMAT = "robotwin_rgb_proprio_oracle_event_observer_v2"
 EVENT_NAMES = (
     "approach",
     "grasp",
+    "lift",
     "transport",
+    "align",
     "place",
     "release",
-    "drop",
-    "regrasp",
-    "open",
-    "activate",
+    "failure",
     "idle",
+)
+RELATION_NAMES = (
+    "near",
+    "held_by",
+    "supported_by",
+    "inside",
+    "on_top_of",
+    "open",
+    "pressed",
+    "activated",
+    "released",
+    "dropped",
+    "lifted",
+    "away_from",
 )
 ARCHIVE_HASH_CACHE: dict[Path, str] = {}
 
@@ -161,6 +174,75 @@ def event_boundary_and_progress(events: np.ndarray) -> tuple[np.ndarray, np.ndar
     return boundary, progress
 
 
+def canonical_event_targets(
+    relations: np.ndarray,
+    node_features: np.ndarray,
+    success: np.ndarray,
+    roster_json: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert replay oracle relations into exclusive Event-SMDP states.
+
+    This conversion runs only while materializing labels.  Object position,
+    contact-derived ``held_by`` and target membership are never written as
+    observer inputs.  ``lift`` is the vertically dominant part of a held,
+    lifted motion; the subsequent held motion is ``transport`` until target
+    alignment.  ``release`` remains a posterior target but is not allowed to
+    overwrite a terminal place/failure state.
+    """
+    relation_values = np.asarray(relations, dtype=np.float32)
+    nodes = np.asarray(node_features, dtype=np.float32)
+    succeeded = np.asarray(success, dtype=bool)
+    if relation_values.ndim != 4 or relation_values.shape[1:] != (len(RELATION_NAMES), 8, 8):
+        raise ValueError("legacy replay relations must have shape [T,12,8,8]")
+    if nodes.shape != (len(relation_values), 8, 24) or succeeded.shape != (len(relation_values),):
+        raise ValueError("replay oracle arrays are not time aligned")
+    roster = json.loads(roster_json)
+    index = {str(item["name"]): offset for offset, item in enumerate(roster)}
+    moving, target = index.get("moving"), index.get("target")
+    if moving is None:
+        raise ValueError("replay roster has no moving object for Event-SMDP labels")
+    grippers = [
+        offset
+        for offset, item in enumerate(roster)
+        if str(item.get("type")) in {"left_gripper", "right_gripper"}
+    ]
+    if not grippers:
+        raise ValueError("replay roster has no gripper for Event-SMDP labels")
+    relation = {name: relation_values[:, offset] >= 0.5 for offset, name in enumerate(RELATION_NAMES)}
+    held = relation["held_by"][:, moving, grippers].any(axis=1)
+    lifted = relation["lifted"][:, moving, moving]
+    released = relation["released"][:, moving, moving]
+    dropped = relation["dropped"][:, moving, moving]
+    placed = np.zeros(len(relation_values), dtype=bool)
+    aligned = np.zeros(len(relation_values), dtype=bool)
+    if target is not None:
+        aligned = relation["near"][:, moving, target]
+        placed = (
+            relation["supported_by"][:, moving, target]
+            | relation["inside"][:, moving, target]
+            | relation["on_top_of"][:, moving, target]
+        )
+    object_velocity = np.zeros((len(nodes), 3), dtype=np.float32)
+    object_velocity[1:] = np.diff(nodes[:, moving, :3], axis=0)
+    vertical_lift = held & lifted & (
+        (object_velocity[:, 2] > 0.0)
+        & (object_velocity[:, 2] >= np.linalg.norm(object_velocity[:, :2], axis=1))
+    )
+    state = np.full(len(nodes), EVENT_NAMES.index("approach"), dtype=np.int64)
+    state[held & ~lifted] = EVENT_NAMES.index("grasp")
+    state[held & lifted] = EVENT_NAMES.index("transport")
+    state[vertical_lift] = EVENT_NAMES.index("lift")
+    state[held & lifted & aligned] = EVENT_NAMES.index("align")
+    state[placed | succeeded] = EVENT_NAMES.index("place")
+    state[dropped] = EVENT_NAMES.index("failure")
+    target_values = np.zeros((len(nodes), len(EVENT_NAMES)), dtype=np.float32)
+    target_values[np.arange(len(nodes)), state] = 1.0
+    # Release is an event that can coexist with the terminal state.  It is a
+    # supervised posterior head, while ``state`` stays exclusive for SMDP.
+    target_values[released, EVENT_NAMES.index("release")] = 1.0
+    return target_values, state
+
+
 def read_label(path: Path, require_success: bool) -> dict[str, Any]:
     """Read only label fields and validate that the source is an official replay."""
     with h5py.File(path, "r") as handle:
@@ -171,20 +253,27 @@ def read_label(path: Path, require_success: bool) -> dict[str, Any]:
         success = bool(handle.attrs.get("native_success", False))
         if require_success and not success:
             raise ValueError("replayed expert did not satisfy native success")
-        events = np.asarray(handle["events"], dtype=np.float32)
-        if events.shape[1:] != (len(EVENT_NAMES),):
-            raise ValueError(f"unsupported events shape {events.shape}")
         sim_times = np.asarray(handle["sim_times"], dtype=np.float64)
         if "ee_state16" not in handle:
             raise ValueError(
                 "replay sidecar lacks ee_state16; rerun with post-physics proprioception capture"
             )
         proprio = replay_proprio(np.asarray(handle["ee_state16"]), sim_times)
+        for name in ("relations", "node_features", "success"):
+            if name not in handle:
+                raise ValueError(f"replay sidecar lacks oracle label source {name}")
+        event_target, event_state_id = canonical_event_targets(
+            np.asarray(handle["relations"]),
+            np.asarray(handle["node_features"]),
+            np.asarray(handle["success"]),
+            str(handle.attrs.get("node_roster_json", "")),
+        )
         return {
             "archive": archive,
             "archive_sha256": str(handle.attrs.get("replay_archive_sha256", "")),
             "replay_index": replay_index,
-            "events": events,
+            "event_target": event_target,
+            "event_state_id": event_state_id,
             "sim_times": sim_times,
             "actions14": np.asarray(handle["actions14"], dtype=np.float32),
             "proprio": proprio,
@@ -236,9 +325,10 @@ def create_episode(label_path: Path, output_root: Path, require_success: bool) -
                         proprio_group.create_dataset(
                             key, data=value, compression="gzip", compression_opts=1
                         )
-                    boundary, progress = event_boundary_and_progress(label["events"])
+                    boundary, progress = event_boundary_and_progress(label["event_target"])
                     target.create_dataset("frame_index", data=frame_index)
-                    target.create_dataset("event_target", data=label["events"], compression="gzip", compression_opts=1)
+                    target.create_dataset("event_target", data=label["event_target"], compression="gzip", compression_opts=1)
+                    target.create_dataset("event_state_id", data=label["event_state_id"])
                     target.create_dataset("event_boundary", data=boundary)
                     target.create_dataset("event_progress", data=progress)
                     target.attrs.update({

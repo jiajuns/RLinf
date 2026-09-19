@@ -1,6 +1,7 @@
 """Contracts for RobotWin Event Observer dataset materialization."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import h5py
@@ -46,3 +47,37 @@ def test_replay_proprio_uses_only_current_and_past_samples() -> None:
     np.testing.assert_allclose(proprio["ee_linear_velocity"][2, 0, 0], 1.0)
     np.testing.assert_allclose(proprio["ee_linear_velocity"][1, 1, 0], 2.0)
     np.testing.assert_allclose(proprio["gripper_opening_raw"][:, 0], (0.1, 0.3, 0.6))
+
+
+def test_canonical_event_targets_are_exclusive_except_release() -> None:
+    """Replay-only geometry produces the Event-SMDP state sequence."""
+    steps = 6
+    relations = np.zeros((steps, 12, 8, 8), dtype=np.float32)
+    nodes = np.zeros((steps, 8, 24), dtype=np.float32)
+    success = np.zeros(steps, dtype=bool)
+    # moving object is node 0, target is 1, and left gripper is 2.
+    relations[1:, 1, 0, 2] = 1.0  # held_by
+    relations[2:, 10, 0, 0] = 1.0  # lifted
+    nodes[2, 0, 2] = 0.1  # vertically dominant lift
+    nodes[3, 0, 0] = 0.1  # horizontal transport
+    relations[4, 0, 0, 1] = 1.0  # target alignment
+    relations[5, 8, 0, 0] = 1.0  # released
+    success[5] = True
+    roster = json.dumps(
+        [
+            {"name": "moving", "type": "object"},
+            {"name": "target", "type": "support"},
+            {"name": "left_gripper", "type": "left_gripper"},
+        ]
+    )
+    targets, state = _MODULE.canonical_event_targets(relations, nodes, success, roster)
+    names = _MODULE.EVENT_NAMES
+    assert [names[index] for index in state] == [
+        "approach",
+        "grasp",
+        "lift",
+        "transport",
+        "align",
+        "place",
+    ]
+    assert targets[5, names.index("release")] == 1.0
