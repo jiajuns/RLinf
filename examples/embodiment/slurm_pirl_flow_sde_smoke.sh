@@ -89,6 +89,7 @@ python examples/embodiment/train_embodied_agent.py \
   actor.seed="$PIRL_SEED" env.train.seed="$PIRL_SEED" env.eval.seed="$PIRL_SEED" \
   env.train.init_params.sensor_configs.shader_pack=minimal \
   env.eval.init_params.sensor_configs.shader_pack=minimal \
+  env.train.init_params.render_mode=sensors env.eval.init_params.render_mode=sensors \
   env.eval.video_cfg.save_video=false \
   actor.micro_batch_size="$PIRL_MICRO_BATCH_SIZE" actor.global_batch_size="$PIRL_GLOBAL_BATCH_SIZE" \
   actor.model.openpi.noise_method=flow_sde actor.model.openpi.noise_level=0.5 \
