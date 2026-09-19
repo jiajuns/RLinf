@@ -68,10 +68,26 @@ PIRL_SEED="${PIRL_SEED:-0}"
 PIRL_REWARD_TYPE="${PIRL_REWARD_TYPE:-}"
 PIRL_MICRO_BATCH_SIZE="${PIRL_MICRO_BATCH_SIZE:-1}"
 PIRL_GLOBAL_BATCH_SIZE="${PIRL_GLOBAL_BATCH_SIZE:-2}"
+# When more than one GPU is allocated, keep the policy/rollout colocated for
+# the stock patch weight sync but reserve a physically separate GPU for
+# ManiSkill.  This preserves the πRL algorithm and observations; it only
+# prevents SAPIEN camera buffers from competing with the two π0.5 copies.
+# Empty keeps the original official colocated placement.
+PIRL_ENV_GPU="${PIRL_ENV_GPU:-}"
 
 extra_overrides=()
 if [[ -n "$PIRL_REWARD_TYPE" ]]; then
   extra_overrides+=("algorithm.reward_type=$PIRL_REWARD_TYPE")
+fi
+
+placement_overrides=()
+if [[ -n "$PIRL_ENV_GPU" ]]; then
+  placement_overrides+=(
+    "~cluster.component_placement.actor,env,rollout"
+    "+cluster.component_placement.actor=0"
+    "+cluster.component_placement.rollout=0"
+    "+cluster.component_placement.env=${PIRL_ENV_GPU}"
+  )
 fi
 
 python examples/embodiment/train_embodied_agent.py \
@@ -96,4 +112,5 @@ python examples/embodiment/train_embodied_agent.py \
   actor.model.openpi.joint_logprob=false algorithm.entropy_bonus=0.0 \
   algorithm.adv_type=gae algorithm.loss_type=actor_critic algorithm.reward_type=action_level \
   env.train.event_oracle.enabled=false \
+  "${placement_overrides[@]}" \
   "${extra_overrides[@]}"
