@@ -27,9 +27,12 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="$LEGACY_EXP"
 export ASSETS_PATH="$ROBOTWIN"
 export PYTHONUNBUFFERED=1
-# Do not override the Vulkan ICD.  SAPIEN selects its compatible bundled ICD
-# on this cluster; forcing /usr/share (which does not exist here) hides the
-# allocated H100 from the renderer.
+# The legacy collector calls setdefault() with a nonexistent /usr/share ICD.
+# Preempt it with the compatible ICD shipped by the active SAPIEN environment.
+SAPIEN_ICD=$ROOT/env_etsf/lib/python3.10/site-packages/sapien/vulkan_library/nvidia_icd.json
+test -f "$SAPIEN_ICD"
+export VK_DRIVER_FILES="$SAPIEN_ICD"
+export VK_ICD_FILENAMES="$SAPIEN_ICD"
 mkdir -p "$(dirname "$OUT")" "$ROOT/outputs/robotwin_event_observer"
 cd "$ROBOTWIN"
 python -u "$LEGACY_EXP/collect_robotwin.py" \

@@ -12,6 +12,10 @@
 set -euxo pipefail
 source /share/anaconda3/bin/activate
 conda activate /data/user/leviccdong/EKSF/env_etsf
+SAPIEN_ICD=/data/user/leviccdong/EKSF/env_etsf/lib/python3.10/site-packages/sapien/vulkan_library/nvidia_icd.json
+test -f "$SAPIEN_ICD"
+export VK_DRIVER_FILES="$SAPIEN_ICD"
+export VK_ICD_FILENAMES="$SAPIEN_ICD"
 echo "host=$(hostname)"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi -L || true

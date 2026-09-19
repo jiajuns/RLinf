@@ -37,7 +37,10 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH="$LEGACY_EXP"
 export ASSETS_PATH="$ROBOTWIN"
 export PYTHONUNBUFFERED=1
-# Leave Vulkan ICD selection to SAPIEN's environment activation.
+SAPIEN_ICD=$ROOT/env_etsf/lib/python3.10/site-packages/sapien/vulkan_library/nvidia_icd.json
+test -f "$SAPIEN_ICD"
+export VK_DRIVER_FILES="$SAPIEN_ICD"
+export VK_ICD_FILENAMES="$SAPIEN_ICD"
 mkdir -p "$OUT" "$ROOT/outputs/robotwin_event_observer"
 cd "$ROBOTWIN"
 python -u "$LEGACY_EXP/collect_robotwin.py" \
