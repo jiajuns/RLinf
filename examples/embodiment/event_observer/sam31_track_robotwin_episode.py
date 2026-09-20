@@ -64,10 +64,20 @@ def _best_box(probabilities: object, boxes: object, width: int, height: int) -> 
     x, y, w, h = boxes[index]
     if not np.isfinite([x, y, w, h, probabilities[index]]).all() or w <= 0 or h <= 0:
         return np.zeros(6, np.float32)
-    # SAM returns xywh pixels.  Cx/cy and extent are normalized per image so
-    # camera mounts/resolutions never enter the learned observer as IDs.
+    # SAM 3.1 multiplex currently exposes ``out_boxes_xywh`` normalized to
+    # [0, 1], unlike some older predictor wrappers which returned pixels.
+    # Keep compatibility with both forms: only pixel-form boxes are divided
+    # by the image dimensions.  Dividing normalized boxes a second time turns
+    # a valid object box into a spurious speck at the top-left corner.
+    normalized = float(np.max(np.abs(boxes[:count]))) <= 1.5
+    if normalized:
+        cx, cy, nw, nh = x + 0.5 * w, y + 0.5 * h, w, h
+    else:
+        cx, cy, nw, nh = (x + 0.5 * w) / width, (y + 0.5 * h) / height, w / width, h / height
+    # Cx/cy and extent are normalized per image so camera
+    # mounts/resolutions never enter the learned observer as IDs.
     return np.asarray(
-        [(x + 0.5 * w) / width, (y + 0.5 * h) / height, w / width, h / height,
+        [cx, cy, nw, nh,
          float(probabilities[index]), 1.0],
         np.float32,
     )
