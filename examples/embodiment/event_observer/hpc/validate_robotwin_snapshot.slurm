@@ -23,4 +23,4 @@ export VK_DRIVER_FILES="$ROOT/env_etsf/lib/python3.10/site-packages/sapien/vulka
 export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
 cd "$SOURCE"
 python -u "$REPO/examples/embodiment/event_observer/validate_robotwin_snapshot.py" \
-  --repo "$REPO" --robotwin-assets "$ASSETS" --robotwin-source "$SOURCE" --shader minimal
+  --repo "$REPO" --robotwin-assets "$ASSETS" --robotwin-source "$SOURCE" --shader default
