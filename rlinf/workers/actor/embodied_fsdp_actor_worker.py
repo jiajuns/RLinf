@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import numpy as np
+from pathlib import Path
 import torch
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
@@ -355,6 +356,33 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             model.load_state_dict(model_dict)
 
         return model
+
+    def save_checkpoint(self, save_path: str, step: int = 0) -> None:
+        """Save π0.5 normally and persist the separate Event sidecars too."""
+        super().save_checkpoint(save_path, step)
+        if self._event_sidecar is None or self._rank != 0:
+            return
+        payload: dict[str, object] = {
+            "format": "eventvalue_rl_sidecars_v1",
+            "event_value": self._event_sidecar.event_value.state_dict(),
+            "observer": self._event_sidecar.observer.state_dict(),
+            "rgb_student": (
+                self._event_sidecar.rgb_student.state_dict()
+                if self._event_sidecar.rgb_student is not None
+                else None
+            ),
+            "proprio_time_delta": self._event_sidecar.proprio_time_delta,
+            "branch_supervision_count": self._event_branch_supervision_count,
+        }
+        if self._event_influence_model is not None:
+            payload["influence_model"] = self._event_influence_model.state_dict()
+            payload["influence_optimizer"] = (
+                self._event_influence_optimizer.state_dict()
+                if self._event_influence_optimizer is not None
+                else None
+            )
+        path = Path(save_path) / "eventvalue_sidecars.pt"
+        torch.save(payload, path)
 
     def get_rollout_state_dict(self) -> dict:
         return self.get_model_state_dict(cpu_offload=False, full_state_dict=False)

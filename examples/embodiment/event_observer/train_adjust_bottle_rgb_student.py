@@ -99,7 +99,7 @@ def main() -> None:
             prediction = model(head.to(device), wrist.to(device), measured_state16.to(device))
             loss = F.smooth_l1_loss(prediction[mask.to(device)], target.to(device)[mask.to(device)])
             optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
-            total += float(loss)
+            total += float(loss.detach())
         validation_mae = evaluate(model, val_loader, device)
         metrics = {"epoch": epoch, "train_huber": total / max(len(train_loader), 1), "val_teacher_feature_mae": validation_mae}
         print(json.dumps(metrics), flush=True)
