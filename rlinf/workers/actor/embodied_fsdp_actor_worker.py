@@ -20,6 +20,7 @@ from torch import nn
 import rlinf.algorithms  # noqa: F401
 from rlinf.algorithms.expert import build_expert_model_config
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
+from rlinf.algorithms.event_value import OnlineEventValueSidecar, infer_event_sidecar_rollout
 from rlinf.config import SupportedModel
 from rlinf.data.schema.embodied_types import Trajectory, convert_trajectories_to_batch
 from rlinf.data.storage.lerobot import resolve_lerobot_repo_id
@@ -72,6 +73,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.enable_offload = self.cfg.actor.get("enable_offload", False)
         self._opd_teacher_model = None
         self.entropy_op_type = self.cfg.algorithm.get("entropy_op_type", "torch")
+        self._event_sidecar: OnlineEventValueSidecar | None = None
+        self._event_value_optimizer: torch.optim.Optimizer | None = None
 
         self.enable_sft_co_train = cfg.actor.get("enable_sft_co_train", False)
         self.version = 0
@@ -110,9 +113,115 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         """
         self.setup_model_and_optimizer()
 
+        self._init_online_event_value_sidecar()
+
         if self.enable_offload:
             self.offload_param_and_grad()
             self.offload_optimizer()
+
+    def _init_online_event_value_sidecar(self) -> None:
+        """Load the frozen online-capable Observer and its trainable ``V_E``.
+
+        The sidecar is opt-in.  Ordinary πRL / GAE configurations therefore
+        instantiate exactly the upstream actor and retain a clean baseline.
+        Its checkpoints are produced from the task-matched SAM-teacher cache;
+        no oracle labels or Zarr lookup are used during PPO rollout.
+        """
+        source = self.cfg.algorithm.get("event_value_source", None)
+        if source != "learned_sidecar":
+            return
+        if self.cfg.algorithm.adv_type not in (
+            "event_smdp_temporal",
+            "event_smdp_interventional",
+        ):
+            raise ValueError("algorithm.event_value_source=learned_sidecar needs an Event-SMDP advantage")
+        sidecar_cfg = self.cfg.algorithm.get("event_sidecar", None)
+        if sidecar_cfg is None:
+            raise ValueError("learned_sidecar requires algorithm.event_sidecar checkpoint paths")
+        observer_checkpoint = sidecar_cfg.get("observer_checkpoint", None)
+        rgb_student_checkpoint = sidecar_cfg.get("rgb_student_checkpoint", None)
+        if not observer_checkpoint or not rgb_student_checkpoint:
+            raise ValueError("event_sidecar needs observer_checkpoint and rgb_student_checkpoint")
+        self._event_sidecar = OnlineEventValueSidecar.from_checkpoints(
+            observer_checkpoint, rgb_student_checkpoint, device=self.device
+        )
+        self._event_value_optimizer = torch.optim.AdamW(
+            self._event_sidecar.event_value.parameters(),
+            lr=float(sidecar_cfg.get("value_lr", 1.0e-4)),
+            weight_decay=float(sidecar_cfg.get("weight_decay", 0.0)),
+        )
+
+    def _populate_learned_event_sidecar(self) -> torch.Tensor:
+        """Attach learned online event values/IDs and update ``V_E`` once.
+
+        The event representation is evaluated from RGB stored in the current
+        rollout, frozen before PPO.  We then make one detached TD/SMDP update
+        of the separate critic from those current-policy returns.  Updating it
+        here, rather than in the FSDP actor optimizer, makes the policy/value
+        parameter boundary explicit and prevents gradients entering π0.5.
+        """
+        if self._event_sidecar is None or self._event_value_optimizer is None:
+            raise RuntimeError("learned Event Value sidecar was not initialized")
+        curr_obs = self.rollout_batch.get("curr_obs")
+        next_obs = self.rollout_batch.get("next_obs")
+        if not curr_obs or not next_obs:
+            raise RuntimeError(
+                "learned Event Value needs rollout RGB. Set rollout.collect_transitions=true "
+                "for the Event-SMDP configuration."
+            )
+        sidecar_device = next(self._event_sidecar.event_value.parameters()).device
+        sidecar_curr_obs = {
+            key: value.to(sidecar_device, non_blocking=True)
+            for key, value in curr_obs.items()
+            if isinstance(value, torch.Tensor)
+        }
+        sidecar_next_obs = {
+            key: value.to(sidecar_device, non_blocking=True)
+            for key, value in next_obs.items()
+            if isinstance(value, torch.Tensor)
+        }
+        sidecar_rollout = infer_event_sidecar_rollout(
+            self._event_sidecar,
+            sidecar_curr_obs,
+            sidecar_next_obs,
+            num_action_chunks=self.cfg.actor.model.num_action_chunks,
+            boundary_threshold=float(
+                self.cfg.algorithm.get("event_boundary_threshold", 0.5)
+            ),
+        )
+        rollout_device = self.rollout_batch["rewards"].device
+        self.rollout_batch["event_ids"] = sidecar_rollout.event_ids.to(rollout_device)
+        self.rollout_batch["event_values"] = sidecar_rollout.event_values.to(rollout_device)
+
+        # The Influence Model is populated by sparse matched-state branches.
+        # Until it has branch supervision, exact zeros deliberately select the
+        # named uniform Event-SMDP ablation instead of inventing causal scores.
+        self.rollout_batch["intervention_influence"] = torch.zeros_like(
+            self.rollout_batch["event_ids"], dtype=self.rollout_batch["event_values"].dtype
+        )
+
+        rewards = self.rollout_batch["rewards"]
+        dones = self.rollout_batch["dones"]
+        chunks, batch, action_chunk = rewards.shape
+        action_rewards = rewards.to(sidecar_device).transpose(1, 2).reshape(chunks * action_chunk, batch)
+        action_dones = dones.to(sidecar_device).transpose(1, 2).reshape((chunks + 1) * action_chunk, batch)[
+            -(chunks * action_chunk + 1) :
+        ]
+        action_ids = sidecar_rollout.event_ids.transpose(1, 2).reshape(
+            chunks * action_chunk, batch
+        )
+        self._event_value_optimizer.zero_grad(set_to_none=True)
+        loss = self._event_sidecar.smdp_value_loss(
+            sidecar_rollout.action_representation,
+            action_rewards,
+            action_dones,
+            action_ids,
+            gamma=float(self.cfg.algorithm.get("gamma", 1.0)),
+        )
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self._event_sidecar.event_value.parameters(), 1.0)
+        self._event_value_optimizer.step()
+        return loss.detach()
 
     def model_provider_func(self) -> nn.Module:
         model = get_model(self.cfg.actor.model)
@@ -291,10 +400,19 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.cfg.algorithm.adv_type == "opd":
             self.compute_opd_teacher_logprobs()
 
+        event_value_loss = None
+        # A deployable RGB student + frozen Observer produces the online event
+        # state.  ``V_E`` alone is updated from the present policy rollout.
+        # This must run before advantage preprocessing so values/IDs retain
+        # RLinf's native [chunk,batch,action] layout.
+        if self.cfg.algorithm.get("event_value_source", None) == "learned_sidecar":
+            event_value_loss = self._populate_learned_event_sidecar()
+
         # Phase-2 oracle control uses the already-collected π0.5 value head as
         # a temporary bootstrap proxy.  It is deliberately explicit in config;
-        # the learned Event Value Critic replaces this field in the next phase.
-        if self.cfg.algorithm.adv_type == "event_smdp_temporal":
+        # the learned Event Value Critic above replaces this field in the next
+        # phase.  This branch remains intact for the oracle ablation.
+        elif self.cfg.algorithm.adv_type == "event_smdp_temporal":
             if self.rollout_batch.get("event_ids") is None:
                 raise RuntimeError(
                     "event_smdp_temporal needs env.train.event_oracle.enabled=true "
@@ -366,6 +484,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch.update({"loss_mask_sum": kwargs["loss_mask_sum"]})
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
+        if event_value_loss is not None:
+            rollout_metrics["event/value_smdp_loss"] = event_value_loss.cpu()
         return rollout_metrics
 
     @Worker.timer("actor/compute_opd_teacher_logprobs")

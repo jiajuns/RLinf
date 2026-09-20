@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 import torch
 from torch import nn
@@ -29,6 +30,26 @@ class EventSidecarOutput:
     boundary_probability: torch.Tensor
     progress: torch.Tensor
     uncertainty: torch.Tensor
+
+
+@dataclass(frozen=True)
+class EventSidecarRollout:
+    """Sidecar tensors aligned to RLinf's chunked embodied rollout layout.
+
+    ``event_ids`` has ``[num_chunks, batch, action_chunk]`` shape and
+    ``event_values`` has the corresponding bootstrap shape
+    ``[num_chunks + 1, batch, action_chunk]``.  The observer sees only one
+    RGB observation at each policy-chunk boundary (the information actually
+    available in RoboTwin's current vectorised API), then its causal state is
+    repeated across actions executed by that chunk.  ``action_representation``
+    is the same expansion with one final bootstrap representation and is used
+    solely for the online Event Value update.
+    """
+
+    event_ids: torch.Tensor
+    event_values: torch.Tensor
+    action_representation: torch.Tensor
+    chunk_output: EventSidecarOutput
 
 
 class OnlineEventValueSidecar(nn.Module):
@@ -146,3 +167,90 @@ class OnlineEventValueSidecar(nn.Module):
             rewards, dones, event_ids, values.detach(), torch.zeros_like(rewards), gamma=gamma
         )
         return F.smooth_l1_loss(values[:-1], targets.detach())
+
+
+def _right_wrist_stream(wrist_images: torch.Tensor) -> torch.Tensor:
+    """Select the right wrist stream from a time-major RLinf observation.
+
+    RoboTwin exposes wrist streams as ``[T,B,W,H,W,3]`` in left-to-right
+    order.  The task-matched RGB student is trained with its right-camera HDF
+    stream, so online inference must use the matching stream rather than
+    silently concatenate both cameras.  Single-wrist embodiments use
+    ``[T,B,H,W,3]`` and pass through unchanged.
+    """
+    if wrist_images.ndim == 6:
+        if wrist_images.shape[-1] != 3 or wrist_images.shape[2] < 1:
+            raise ValueError("wrist_images must be [time,batch,camera,height,width,3]")
+        return wrist_images[:, :, -1]
+    if wrist_images.ndim == 5 and wrist_images.shape[-1] == 3:
+        return wrist_images
+    raise ValueError("wrist_images must be [time,batch,height,width,3] or include a camera dimension")
+
+
+def infer_event_sidecar_rollout(
+    sidecar: OnlineEventValueSidecar,
+    curr_obs: Mapping[str, torch.Tensor],
+    next_obs: Mapping[str, torch.Tensor],
+    *,
+    num_action_chunks: int,
+    boundary_threshold: float = 0.5,
+) -> EventSidecarRollout:
+    """Infer learned Event-SMDP fields from real online RoboTwin RGB.
+
+    This function intentionally consumes the rollout observations, not the
+    offline SAM/Zarr cache.  ``curr_obs`` and ``next_obs`` are time-major
+    tensors recorded by :class:`EmbodiedTrajectoryBuilder`; their final next
+    observation supplies the exact bootstrap image needed by ``V_E``.  It is
+    kept framework-independent so the actor integration is directly unit
+    testable without creating FSDP workers.
+    """
+    if num_action_chunks < 1:
+        raise ValueError("num_action_chunks must be positive")
+    required = {"main_images", "wrist_images"}
+    missing = required.difference(curr_obs) | required.difference(next_obs)
+    if missing:
+        raise ValueError(f"online Event Value requires rollout observations {sorted(missing)}")
+    current_head = curr_obs["main_images"]
+    current_wrist = _right_wrist_stream(curr_obs["wrist_images"])
+    next_head = next_obs["main_images"]
+    next_wrist = _right_wrist_stream(next_obs["wrist_images"])
+    if current_head.ndim != 5 or current_head.shape[-1] != 3:
+        raise ValueError("main_images must have shape [time,batch,height,width,3]")
+    if next_head.shape != current_head.shape or next_wrist.shape != current_wrist.shape:
+        raise ValueError("current and next RGB observations must have equal time-major shapes")
+    if current_head.shape[:2] != current_wrist.shape[:2]:
+        raise ValueError("main_images and wrist_images must share time/batch dimensions")
+
+    # The GRU is batch-first.  Append only the final successor: every earlier
+    # successor is the next current frame and would otherwise be duplicated.
+    head = torch.cat((current_head, next_head[-1:]), dim=0).transpose(0, 1).contiguous()
+    wrist = torch.cat((current_wrist, next_wrist[-1:]), dim=0).transpose(0, 1).contiguous()
+    output = sidecar.infer_images(head, wrist, boundary_threshold=boundary_threshold)
+    chunks, batch = current_head.shape[:2]
+    if output.values.shape != (batch, chunks + 1):
+        raise RuntimeError("Event sidecar output is not aligned to chunk observations")
+
+    # Flattened action-level advantage code expects the values in a padded
+    # [C+1,B,K] layout.  The last bootstrap is placed at index C,B,0; the
+    # remaining padded values are never consumed by preprocess_embodied_... .
+    event_ids = output.event_ids[:, :-1].transpose(0, 1).unsqueeze(-1).expand(
+        chunks, batch, num_action_chunks
+    ).contiguous()
+    event_values = output.values.new_zeros((chunks + 1, batch, num_action_chunks))
+    event_values[:-1] = output.values[:, :-1].transpose(0, 1).unsqueeze(-1).expand(
+        chunks, batch, num_action_chunks
+    )
+    event_values[-1, :, 0] = output.values[:, -1]
+    action_representation = torch.cat(
+        (
+            output.representation[:, :-1].repeat_interleave(num_action_chunks, dim=1),
+            output.representation[:, -1:],
+        ),
+        dim=1,
+    )
+    return EventSidecarRollout(
+        event_ids=event_ids,
+        event_values=event_values,
+        action_representation=action_representation,
+        chunk_output=output,
+    )
