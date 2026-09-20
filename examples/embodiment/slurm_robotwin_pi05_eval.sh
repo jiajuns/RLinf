@@ -66,14 +66,23 @@ args=(
   +rollout.model.model_type=openpi
   +rollout.model.num_action_chunks=50
   +rollout.model.action_dim=14
+  +rollout.model.is_lora=false
+  +rollout.model.lora_rank=32
+  +rollout.model.use_proprio=true
   +rollout.model.num_steps=5
   +rollout.model.add_value_head=true
   +rollout.model.openpi.config_name=pi05_aloha_robotwin
   +rollout.model.openpi.num_images_in_input=3
   +rollout.model.openpi.noise_level=0.3
+  +rollout.model.openpi.action_chunk=50
+  +rollout.model.openpi.num_steps=5
+  +rollout.model.openpi.train_expert_only=true
+  +rollout.model.openpi.action_env_dim=14
+  +rollout.model.openpi.add_value_head=true
   +rollout.model.openpi.detach_critic_input=true
   +rollout.model.openpi.noise_method=flow_sde
   +rollout.model.openpi.value_after_vlm=false
+  +rollout.model.openpi.value_vlm_mode=mean_token
   +rollout.model.openpi.joint_logprob=false
 )
 
