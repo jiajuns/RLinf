@@ -5,6 +5,7 @@ import torch
 from rlinf.models.embodiment.event_observer import (
     EventObserver,
     EventValueCritic,
+    RGBRoleFeatureStudent,
     event_observer_supervision_loss,
 )
 
@@ -52,3 +53,12 @@ def test_relation_heads_are_separate_from_task_general_event_state() -> None:
         geometric_relation_target=torch.zeros(1, 2, 3), state_change_target=torch.zeros(1, 2, 2),
     )
     assert {"geometric_relations", "state_changes"}.issubset(losses)
+
+
+def test_rgb_role_feature_student_is_online_image_only_and_sequence_aligned() -> None:
+    student = RGBRoleFeatureStudent(30, hidden_dim=16, image_size=(32, 32))
+    head = torch.randint(0, 255, (2, 3, 48, 64, 3), dtype=torch.uint8)
+    wrist = torch.randint(0, 255, (2, 3, 48, 64, 3), dtype=torch.uint8)
+    output = student(head, wrist)
+    assert output.shape == (2, 3, 30)
+    assert torch.isfinite(output).all()

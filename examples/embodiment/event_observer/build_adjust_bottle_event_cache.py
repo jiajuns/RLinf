@@ -97,6 +97,10 @@ def convert(episode: Path, track_path: Path, output: Path) -> None:
         output,
         format=np.asarray("adjust_bottle_event_cache_v1"),
         episode_sha256=np.asarray(sha256(episode)), track_sha256=np.asarray(track_hash),
+        # Path only: it enables the RGB student trainer to read the same
+        # renderer frames.  It is not an online cache lookup and contains no
+        # privileged simulator state.
+        source_episode=np.asarray(str(episode.resolve())),
         task=np.asarray(task), cameras=np.asarray(cameras),
         features=make_features(tracks, ee, times),
         # The two cameras are fused into a single frame feature vector.  Token

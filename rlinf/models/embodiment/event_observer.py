@@ -122,6 +122,52 @@ class EventValueCritic(nn.Module):
         return self.value(representation).squeeze(-1)
 
 
+class RGBRoleFeatureStudent(nn.Module):
+    """Small online RGB student for offline SAM teacher feature vectors.
+
+    SAM 3.1 remains an offline teacher only.  This model consumes the head and
+    wrist RGB streams already supplied to π0.5, projects them to the compact
+    Role-Graph feature interface, and lets a frozen Event Observer run on new
+    PPO states without HDF/Zarr lookup.
+    """
+
+    def __init__(self, feature_dim: int, *, hidden_dim: int = 128, image_size: tuple[int, int] = (96, 128)) -> None:
+        super().__init__()
+        if feature_dim < 1 or hidden_dim < 1 or min(image_size) < 16:
+            raise ValueError("RGBRoleFeatureStudent dimensions must be positive")
+        self.feature_dim = feature_dim
+        self.image_size = image_size
+        self.encoder = nn.Sequential(
+            nn.Conv2d(6, 32, kernel_size=5, stride=2, padding=2), nn.GELU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), nn.GELU(),
+            nn.Conv2d(64, hidden_dim, kernel_size=3, stride=2, padding=1), nn.GELU(),
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim), nn.GELU(),
+            nn.Linear(hidden_dim, feature_dim),
+        )
+
+    def _prepare_images(self, images: torch.Tensor, name: str) -> torch.Tensor:
+        if images.ndim != 5 or images.shape[-1] != 3:
+            raise ValueError(f"{name} must have shape [batch,time,height,width,3]")
+        batch, steps = images.shape[:2]
+        value = images.reshape(batch * steps, *images.shape[2:]).permute(0, 3, 1, 2).float()
+        if value.max() > 1.0:
+            value = value / 255.0
+        return F.interpolate(value, size=self.image_size, mode="bilinear", align_corners=False)
+
+    def forward(self, head_images: torch.Tensor, wrist_images: torch.Tensor) -> torch.Tensor:
+        if head_images.shape[:2] != wrist_images.shape[:2]:
+            raise ValueError("head and wrist image batch/time prefixes must match")
+        batch, steps = head_images.shape[:2]
+        encoded = self.encoder(torch.cat((
+            self._prepare_images(head_images, "head_images"),
+            self._prepare_images(wrist_images, "wrist_images"),
+        ), dim=1))
+        return self.head(encoded).reshape(batch, steps, self.feature_dim)
+
+
 def event_observer_supervision_loss(
     prediction: EventObserverPrediction,
     *,
