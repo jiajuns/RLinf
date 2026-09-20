@@ -3,10 +3,10 @@
 # correction to the identical stabilised πRL/GAE control, never a hard GAE replacement.
 #SBATCH --job-name=robotwin_eventvalue_v2
 #SBATCH --partition=acd_ue
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=48
 #SBATCH --time=48:00:00
 #SBATCH --output=/data/user/leviccdong/EKSF/outputs/robotwin_eventvalue_v2_%j.out
 #SBATCH --error=/data/user/leviccdong/EKSF/outputs/robotwin_eventvalue_v2_%j.err
@@ -15,7 +15,7 @@ set -euo pipefail
 export RLINF_LOCAL_RAY=1
 unset RAY_ADDRESS
 export RLINF_RAY_TMPDIR="/tmp/rlinf_ray_${SLURM_JOB_ID:?}"
-export RLINF_COMPONENT_PLACEMENT="${RLINF_COMPONENT_PLACEMENT:-0}"
+export RLINF_COMPONENT_PLACEMENT="${RLINF_COMPONENT_PLACEMENT:-0-3}"
 export REPO_PATH="${REPO_PATH:-/data/user/leviccdong/EKSF/code/RLinf-piRL}"
 export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
 export ROBOTWIN_PATH="${ROBOTWIN_PATH:-/data/user/leviccdong/EKSF/runtime/RoboTwin-RLinf_support}"
@@ -28,9 +28,9 @@ export ROBOT_PLATFORM=ALOHA
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
 export ROBOTWIN_MAX_EPOCHS="${ROBOTWIN_MAX_EPOCHS:-100}"
-export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-2}"
-export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-2}"
-export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-2}"
+export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-8}"
+export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-8}"
+export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-8}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-1}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_eventvalue_v2}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_eventvalue_v2}"

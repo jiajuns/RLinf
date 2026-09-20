@@ -5,10 +5,10 @@
 # budget; all Event-SMDP ablations must retain the same actor rollout budget.
 #SBATCH --job-name=robotwin_pi05_gae
 #SBATCH --partition=acd_ue
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=48
 #SBATCH --time=48:00:00
 #SBATCH --output=/data/user/leviccdong/EKSF/outputs/robotwin_pi05_gae_%j.out
 #SBATCH --error=/data/user/leviccdong/EKSF/outputs/robotwin_pi05_gae_%j.err
@@ -21,7 +21,7 @@ export RLINF_RAY_TMPDIR="/tmp/rlinf_ray_${SLURM_JOB_ID:?}"
 # The upstream RoboTwin recipe is authored for ranks 0-7.  This formal
 # reproduction job requests one GPU, so all collocated components must occupy
 # rank 0 rather than failing configuration validation before training starts.
-export RLINF_COMPONENT_PLACEMENT="${RLINF_COMPONENT_PLACEMENT:-0}"
+export RLINF_COMPONENT_PLACEMENT="${RLINF_COMPONENT_PLACEMENT:-0-3}"
 
 export REPO_PATH="${REPO_PATH:-/data/user/leviccdong/EKSF/code/RLinf-piRL}"
 export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
@@ -39,11 +39,11 @@ export HYDRA_FULL_ERROR=1
 # small enough for a one-H100 reproducibility run; scaling must adjust baseline
 # and Event-SMDP together.
 export ROBOTWIN_MAX_EPOCHS="${ROBOTWIN_MAX_EPOCHS:-100}"
-export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-2}"
-export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-2}"
+export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-8}"
+export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-8}"
 export ROBOTWIN_ROLLOUT_EPOCHS="${ROBOTWIN_ROLLOUT_EPOCHS:-1}"
 export ROBOTWIN_EVAL_ROLLOUT_EPOCHS="${ROBOTWIN_EVAL_ROLLOUT_EPOCHS:-8}"
-export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-2}"
+export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-8}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-1}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_pi05_gae}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_pi05_flow_sde_action_gae}"

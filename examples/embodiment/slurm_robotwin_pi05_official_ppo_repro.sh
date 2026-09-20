@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Strict RLinf RoboTwin π0.5 + PPO/GAE reproduction.
-# Deliberately preserve all published YAML defaults: 8 GPU placement, 256
+# RLinf RoboTwin π0.5 + PPO/GAE reproduction under the paper-wide 4-GPU profile.
+# Deliberately preserve all published algorithm defaults: 256
 # train envs, rollout_epoch=4, batch=2048/32, chunk-level GAE, update_epoch=5,
 # lr=5e-6, clip=0.2, and max_epochs=1000.
 #SBATCH --job-name=robotwin_pi05_official_ppo
 #SBATCH --partition=acd_ue
-#SBATCH --gres=gpu:8
+#SBATCH --gres=gpu:4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=96
+#SBATCH --cpus-per-task=48
 #SBATCH --time=72:00:00
 #SBATCH --output=/data/user/leviccdong/EKSF/outputs/robotwin_pi05_official_ppo_%j.out
 #SBATCH --error=/data/user/leviccdong/EKSF/outputs/robotwin_pi05_official_ppo_%j.err
@@ -17,7 +17,7 @@ set -euo pipefail
 export RLINF_LOCAL_RAY=1
 unset RAY_ADDRESS
 export RLINF_RAY_TMPDIR="/tmp/rlinf_ray_${SLURM_JOB_ID:?}"
-export RLINF_COMPONENT_PLACEMENT=0-7
+export RLINF_COMPONENT_PLACEMENT=0-3
 export REPO_PATH="${REPO_PATH:-/data/user/leviccdong/EKSF/code/RLinf-piRL}"
 export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
 export ROBOTWIN_PATH="${ROBOTWIN_PATH:-/data/user/leviccdong/EKSF/runtime/RoboTwin-RLinf_support}"
