@@ -60,6 +60,7 @@ exec python examples/embodiment/train_embodied_agent.py \
   runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" \
   runner.val_check_interval=25 \
   runner.save_interval=25 \
+  'cluster.component_placement."actor, env, rollout"=0' \
   env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" \
   env.eval.total_num_envs="${ROBOTWIN_EVAL_ENVS}" \
   env.train.rollout_epoch="${ROBOTWIN_ROLLOUT_EPOCHS}" \
