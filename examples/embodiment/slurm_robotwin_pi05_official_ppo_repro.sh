@@ -41,6 +41,8 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   actor.global_batch_size=1024 \
   env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
+  env.train.video_cfg.save_video=false \
+  env.eval.video_cfg.save_video=false \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   +rollout.unnorm_key=adjust_bottle

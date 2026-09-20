@@ -43,6 +43,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" runner.val_check_interval=25 runner.save_interval=25 \
   env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" env.eval.total_num_envs="${ROBOTWIN_EVAL_ENVS}" \
   env.train.rollout_epoch=4 env.eval.rollout_epoch=1 env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
+  env.train.video_cfg.save_video=false env.eval.video_cfg.save_video=false \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   +rollout.unnorm_key=adjust_bottle +rollout.collect_transitions=true \
   algorithm.reward_type=chunk_level algorithm.logprob_type=chunk_level algorithm.adv_type=event_smdp_residual algorithm.loss_type=actor_critic \

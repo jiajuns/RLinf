@@ -34,5 +34,6 @@ cd "${REPO_PATH}"
 # robotwin_adjust_bottle_openpi_pi05_eval.yaml without reducing 128 eval envs.
 bash evaluations/run_eval.sh robotwin robotwin_adjust_bottle_openpi_pi05_eval \
   "env.eval.assets_path=${ROBOTWIN_ASSETS_PATH}" \
+  env.eval.video_cfg.save_video=false \
   "rollout.model.model_path=${ROBOTWIN_PI05_MODEL}" \
   +rollout.unnorm_key=adjust_bottle
