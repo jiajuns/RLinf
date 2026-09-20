@@ -77,7 +77,14 @@ class EventInfluenceModel(nn.Module):
             values.append(state_features)
         elif state_features is not None:
             raise ValueError("state_features were passed but state_dim is zero")
-        return self.network(torch.cat(values, dim=-1)).squeeze(-1)
+        # The upstream π0.5/FSDP stack can set its default floating dtype to
+        # float64 while rollout actions and the frozen RGB Observer remain
+        # float32.  ``I_ξ`` is an auxiliary network, so its own parameter dtype
+        # is the unambiguous interface contract; normalize its inputs here
+        # instead of relying on a process-wide default dtype.
+        inputs = torch.cat(values, dim=-1)
+        parameter = next(self.network.parameters())
+        return self.network(inputs.to(device=parameter.device, dtype=parameter.dtype)).squeeze(-1)
 
     @staticmethod
     def loss(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:

@@ -46,3 +46,11 @@ def test_influence_model_accepts_sparse_branch_supervision():
         [[True, False, True, False], [False, True, False, True]]
     ))
     assert torch.isfinite(loss)
+
+
+def test_influence_model_normalizes_online_float_inputs_to_its_parameter_dtype():
+    """π0.5 may build auxiliary modules under a float64 default dtype."""
+    model = EventInfluenceModel(event_representation_dim=3, action_dim=2, hidden_dim=8).double()
+    prediction = model(torch.randn(2, 3, 3, dtype=torch.float32), torch.randn(2, 3, 2, dtype=torch.float32))
+    assert prediction.dtype == torch.float64
+    assert torch.isfinite(prediction).all()
