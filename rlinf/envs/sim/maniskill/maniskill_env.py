@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Optional, OrderedDict, Union
 
 import gymnasium as gym
@@ -29,6 +30,42 @@ from rlinf.envs.sim.maniskill.utils import allow_pci_render_backend
 from rlinf.envs.sim.maniskill.event_oracle import classify_put_on_event
 
 __all__ = ["ManiskillEnv"]
+
+
+def normalize_isolated_gpu_backends(env_args: dict) -> dict:
+    """Address ManiSkill devices in the worker-local CUDA namespace.
+
+    RLinf isolates an environment worker by setting ``CUDA_VISIBLE_DEVICES`` to
+    the GPU assigned by the placement policy.  At that point the worker may
+    see only one physical GPU (possibly physical GPU 1, 2, ...), whose *local*
+    CUDA index is nevertheless always zero.  ManiSkill accepts explicit
+    ``physx_cuda:N`` / ``sapien_cuda:N`` selectors.  Leaving its generic
+    ``gpu`` aliases here has caused SAPIEN camera allocation to address the
+    physical index after isolation, producing ``invalid device ordinal`` and
+    Vulkan device-loss failures on split actor/environment placements.
+
+    Do not alter CPU or PCI render backends: those are explicit user choices.
+    This normalization is intentionally limited to isolated GPU workers.
+    """
+    if os.environ.get("ISOLATE_ACCELERATOR", "0") != "1":
+        return env_args
+
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not visible_devices:
+        return env_args
+
+    sim_backend = env_args.get("sim_backend", "auto")
+    if sim_backend in {"gpu", "cuda", "physx_cuda"} or str(sim_backend).startswith(
+        "physx_cuda:"
+    ):
+        env_args["sim_backend"] = "physx_cuda:0"
+
+        render_backend = env_args.get("render_backend", "gpu")
+        if render_backend in {"gpu", "cuda", "sapien_cuda"} or str(
+            render_backend
+        ).startswith("sapien_cuda:"):
+            env_args["render_backend"] = "sapien_cuda:0"
+    return env_args
 
 
 def extract_termination_from_info(info, num_envs, device):
@@ -98,6 +135,7 @@ class ManiskillEnv(gym.Env):
         with open_dict(cfg):
             cfg.init_params.num_envs = num_envs
         env_args = OmegaConf.to_container(cfg.init_params, resolve=True)
+        env_args = normalize_isolated_gpu_backends(env_args)
         allow_pci_render_backend()
         self.env: BaseEnv = gym.make(**env_args)
         self.prev_step_reward = torch.zeros(self.num_envs, dtype=torch.float32).to(
