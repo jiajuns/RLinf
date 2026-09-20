@@ -24,6 +24,7 @@ EPISODE_LIST=${SAM_EPISODE_LIST:?set a successful adjust_bottle manifest}
 TRACK_ROOT=${SAM_TRACK_ROOT:-$ROOT/data/robotwin_adjust_bottle_event_tracks_v1}
 CACHE_ROOT=${EVENT_CACHE_ROOT:-$ROOT/data/robotwin_adjust_bottle_event_cache_v1}
 EPISODES_PER_TASK=${EPISODES_PER_TASK:-1}
+REBUILD_EVENT_CACHE=${REBUILD_EVENT_CACHE:-0}
 TASK_ID=${SLURM_ARRAY_TASK_ID:?submit this as a Slurm array}
 START=$((TASK_ID * EPISODES_PER_TASK))
 TOTAL=$(wc -l < "$EPISODE_LIST")
@@ -41,9 +42,20 @@ for INDEX in $(seq "$START" "$((END - 1))"); do
   TRACK="$TRACK_ROOT/$NAME.npz"
   OUTPUT="$CACHE_ROOT/$NAME.npz"
   test -s "$TRACK"
-  if test -s "$OUTPUT"; then
-    echo "existing $OUTPUT"
-    continue
+  if test -s "$OUTPUT" && test "$REBUILD_EVENT_CACHE" != 1; then
+    # Old caches produced before the RGB-student stage lack source_episode;
+    # rebuild those automatically rather than silently training a student on
+    # an incomplete teacher corpus.
+    if python - "$OUTPUT" <<'PY'
+import sys
+import numpy as np
+with np.load(sys.argv[1], allow_pickle=False) as data:
+    raise SystemExit(0 if "source_episode" in data else 1)
+PY
+    then
+      echo "existing compatible $OUTPUT"
+      continue
+    fi
   fi
   python -u "$REPO/examples/embodiment/event_observer/build_adjust_bottle_event_cache.py" \
     --episode "$EPISODE" --tracks "$TRACK" --output "$OUTPUT"
