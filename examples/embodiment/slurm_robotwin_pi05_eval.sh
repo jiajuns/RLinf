@@ -44,6 +44,7 @@ export ROBOTWIN_EVAL_TAG="${ROBOTWIN_EVAL_TAG:-pi05_sft}"
 export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-8}"
 export ROBOTWIN_EVAL_ROLLOUT_EPOCHS="${ROBOTWIN_EVAL_ROLLOUT_EPOCHS:-8}"
 export ROBOTWIN_EVAL_LOG_PATH="${ROBOTWIN_EVAL_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_checkpoint_eval}"
+export ROBOTWIN_EVAL_RUN_PATH="${ROBOTWIN_EVAL_RUN_PATH:-${ROBOTWIN_EVAL_LOG_PATH}/${ROBOTWIN_EVAL_TAG}}"
 
 if [[ -n "${ROBOTWIN_EVAL_CKPT:-}" && ! -s "${ROBOTWIN_EVAL_CKPT}" ]]; then
   echo "ROBOTWIN_EVAL_CKPT is not a readable checkpoint: ${ROBOTWIN_EVAL_CKPT}" >&2
@@ -55,7 +56,7 @@ source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 
 args=(
   runner.only_eval=true
-  runner.logger.log_path="${ROBOTWIN_EVAL_LOG_PATH}"
+  runner.logger.log_path="${ROBOTWIN_EVAL_RUN_PATH}"
   runner.logger.experiment_name="${ROBOTWIN_EVAL_TAG}"
   env.eval.total_num_envs="${ROBOTWIN_EVAL_ENVS}"
   env.eval.rollout_epoch="${ROBOTWIN_EVAL_ROLLOUT_EPOCHS}"
