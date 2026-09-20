@@ -5,7 +5,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=00:18:00
+# This is also used for the formal 16k-interaction fallback experiment; the
+# prior 18-minute smoke limit would terminate it before even one evaluation.
+#SBATCH --time=24:00:00
 #SBATCH --output=/data/user/leviccdong/EKSF/outputs/pirl_cpu_sim_%j.out
 #SBATCH --error=/data/user/leviccdong/EKSF/outputs/pirl_cpu_sim_%j.err
 
