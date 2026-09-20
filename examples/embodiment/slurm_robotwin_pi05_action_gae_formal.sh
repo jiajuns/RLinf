@@ -46,8 +46,11 @@ cd "${REPO_PATH}"
 # already-running ManiSkill πRL jobs.
 source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 
+# Hydra resolves config paths relative to train_embodied_agent.py's directory.
+# Passing examples/embodiment/config here therefore produced a duplicated
+# examples/embodiment/examples/embodiment/config path on the HPC.
 exec python examples/embodiment/train_embodied_agent.py \
-  --config-path examples/embodiment/config \
+  --config-path config \
   --config-name robotwin_adjust_bottle_ppo_openpi_pi05_action_gae \
   runner.max_epochs="${ROBOTWIN_MAX_EPOCHS}" \
   runner.logger.log_path="${ROBOTWIN_LOG_PATH}" \
