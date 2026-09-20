@@ -114,6 +114,46 @@ class RoboTwinEnv(gym.Env):
         """Legacy generic-snapshot alias; branches should prefer load_state."""
         self.load_state(state)
 
+    def branch_step(self, branch_actions: torch.Tensor, *, horizon: int) -> dict[str, torch.Tensor]:
+        """Evaluate short matched-state action branches without changing live state.
+
+        ``branch_actions`` is sampled by the π0.5 rollout worker from the
+        same RGB observation using its configured Flow-SDE sampler.  Every
+        candidate starts from one serialized SAPIEN state and the live state is
+        restored even if one candidate errors.  These simulator transitions
+        are returned explicitly so experiment accounting can include them.
+        """
+        if branch_actions.ndim != 4:
+            raise ValueError("branch_actions must be [batch,candidates,chunk,action_dim]")
+        if branch_actions.shape[0] != self.num_envs or not 1 <= horizon <= branch_actions.shape[2]:
+            raise ValueError("branch action batch/horizon is incompatible with RoboTwinEnv")
+        snapshot = self.get_state()
+        rewards, main_images, wrist_images = [], [], []
+        try:
+            for candidate_idx in range(branch_actions.shape[1]):
+                self.load_state(snapshot)
+                obs, reward, _terminated, _truncated, _infos = self.step(
+                    branch_actions[:, candidate_idx, :horizon], auto_reset=False
+                )
+                rewards.append(reward.detach().cpu())
+                main_images.append(obs["main_images"].detach().cpu())
+                wrist = obs.get("wrist_images")
+                if wrist is None:
+                    raise RuntimeError("RoboTwin Event branches require wrist RGB")
+                wrist_images.append(wrist.detach().cpu())
+        finally:
+            self.load_state(snapshot)
+        candidates = branch_actions.shape[1]
+        return {
+            "branch_rewards": torch.stack(rewards, dim=1),
+            "branch_horizons": torch.full(
+                (self.num_envs, candidates), horizon, dtype=torch.long
+            ),
+            "branch_mask": torch.ones(self.num_envs, dtype=torch.bool),
+            "branch_main_images": torch.stack(main_images, dim=1),
+            "branch_wrist_images": torch.stack(wrist_images, dim=1),
+        }
+
     @property
     def device(self):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")

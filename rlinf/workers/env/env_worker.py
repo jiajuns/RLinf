@@ -487,6 +487,7 @@ class EnvWorker(Worker):
         self,
         chunk_actions: torch.Tensor,
         stage_id: int,
+        branch_actions: torch.Tensor | None = None,
     ) -> tuple[EnvOutput, dict[str, Any], dict[str, Any]]:
         """
         This function is used to interact with the environment.
@@ -509,6 +510,19 @@ class EnvWorker(Worker):
             chunk_actions = exec_actions
         env_info = {}
 
+        branch_payload = None
+        if branch_actions is not None:
+            branch_step = get_env_attr(self.env_list[stage_id], "branch_step")
+            if branch_step is None:
+                raise RuntimeError(
+                    "matched-state event branches require an environment with branch_step(); "
+                    "RoboTwinEnv exposes it through SAPIEN snapshots"
+                )
+            branch_horizon = int(
+                self.cfg.algorithm.get("event_branch", {}).get("horizon", 10)
+            )
+            branch_payload = branch_step(branch_actions, horizon=branch_horizon)
+
         obs_list, chunk_rewards, chunk_terminations, chunk_truncations, infos_list = (
             self.env_list[stage_id].chunk_step(chunk_actions)
         )
@@ -516,6 +530,30 @@ class EnvWorker(Worker):
             extracted_obs = obs_list[-1] if obs_list else None
         if isinstance(infos_list, (list, tuple)):
             infos = infos_list[-1] if infos_list else None
+        branch_candidates = int(
+            self.cfg.algorithm.get("event_branch", {}).get("num_candidates", 0)
+        )
+        if branch_payload is None and branch_candidates:
+            # Preserve a dense time axis through trajectory transport while
+            # keeping skipped chunks out of Influence Model supervision.
+            branch_batch_size = extracted_obs["main_images"].shape[0]
+            branch_payload = {
+                "branch_rewards": torch.zeros(
+                    (branch_batch_size, branch_candidates), dtype=torch.float32
+                ),
+                "branch_horizons": torch.zeros(
+                    (branch_batch_size, branch_candidates), dtype=torch.long
+                ),
+                "branch_mask": torch.zeros(branch_batch_size, dtype=torch.bool),
+                "branch_main_images": torch.zeros(
+                    (branch_batch_size, branch_candidates, *extracted_obs["main_images"].shape[1:]),
+                    dtype=extracted_obs["main_images"].dtype,
+                ),
+                "branch_wrist_images": torch.zeros(
+                    (branch_batch_size, branch_candidates, *extracted_obs["wrist_images"].shape[1:]),
+                    dtype=extracted_obs["wrist_images"].dtype,
+                ),
+            }
         chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
         final_obs = (
             self._build_chunk_final_obs(obs_list, infos_list)
@@ -576,6 +614,7 @@ class EnvWorker(Worker):
             rlt_switch_flags=rlt_switch_flags,
             oracle_event_ids=_stack_oracle_field("oracle_event_id"),
             oracle_event_progress=_stack_oracle_field("oracle_event_progress"),
+            **(branch_payload or {}),
         )
         chunk_step_payload = {
             "chunk_actions": exec_actions,
@@ -1205,6 +1244,11 @@ class EnvWorker(Worker):
                         rewards=rewards,
                         oracle_event_ids=env_output.oracle_event_ids,
                         oracle_event_progress=env_output.oracle_event_progress,
+                        branch_rewards=env_output.branch_rewards,
+                        branch_horizons=env_output.branch_horizons,
+                        branch_mask=env_output.branch_mask,
+                        branch_main_images=env_output.branch_main_images,
+                        branch_wrist_images=env_output.branch_wrist_images,
                     )
 
                     self.trajectory_builders[stage_id].append_step_result(
@@ -1236,6 +1280,7 @@ class EnvWorker(Worker):
                     env_output, env_info, chunk_step_payload = self.env_interact_step(
                         policy_output.actions,
                         stage_id,
+                        branch_actions=policy_output.branch_actions,
                     )
                     # Emulated observation latency: wait before the obs goes out,
                     # without blocking the other coroutines in this worker.
@@ -1359,6 +1404,11 @@ class EnvWorker(Worker):
                     rewards=rewards,
                     oracle_event_ids=env_output.oracle_event_ids,
                     oracle_event_progress=env_output.oracle_event_progress,
+                    branch_rewards=env_output.branch_rewards,
+                    branch_horizons=env_output.branch_horizons,
+                    branch_mask=env_output.branch_mask,
+                    branch_main_images=env_output.branch_main_images,
+                    branch_wrist_images=env_output.branch_wrist_images,
                 )
                 self.trajectory_builders[stage_id].append_step_result(chunk_step_result)
                 if (

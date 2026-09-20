@@ -1,6 +1,10 @@
 import torch
 
-from rlinf.algorithms.event_value import OnlineEventValueSidecar, infer_event_sidecar_rollout
+from rlinf.algorithms.event_value import (
+    OnlineEventValueSidecar,
+    infer_branch_future_event_values,
+    infer_event_sidecar_rollout,
+)
 from rlinf.models.embodiment.event_observer import EventObserver, EventValueCritic, RGBRoleFeatureStudent
 
 
@@ -56,3 +60,21 @@ def test_event_sidecar_rollout_expands_chunk_boundary_rgb_without_cache_lookup()
     # Each action in one policy chunk shares the causally available boundary
     # event state; the final representation is a bootstrap only.
     assert torch.equal(rollout.event_ids[:, :, 0], rollout.event_ids[:, :, -1])
+
+
+def test_branch_future_values_keep_the_causal_rgb_prefix():
+    observer = EventObserver(30, 3, 4, hidden_dim=8, num_geometric_primitives=2, num_state_change_primitives=1)
+    sidecar = OnlineEventValueSidecar(
+        observer,
+        EventValueCritic(8, hidden_dim=8),
+        RGBRoleFeatureStudent(30, hidden_dim=8, image_size=(32, 32)),
+    )
+    current = {
+        "main_images": torch.randint(0, 255, (2, 1, 40, 40, 3), dtype=torch.uint8),
+        "wrist_images": torch.randint(0, 255, (2, 1, 2, 40, 40, 3), dtype=torch.uint8),
+    }
+    branch_head = torch.randint(0, 255, (2, 1, 3, 40, 40, 3), dtype=torch.uint8)
+    branch_wrist = torch.randint(0, 255, (2, 1, 3, 2, 40, 40, 3), dtype=torch.uint8)
+    future_values = infer_branch_future_event_values(sidecar, current, branch_head, branch_wrist)
+    assert future_values.shape == (2, 1, 3)
+    assert torch.isfinite(future_values).all()

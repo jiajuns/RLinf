@@ -20,7 +20,12 @@ from torch import nn
 import rlinf.algorithms  # noqa: F401
 from rlinf.algorithms.expert import build_expert_model_config
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
-from rlinf.algorithms.event_value import OnlineEventValueSidecar, infer_event_sidecar_rollout
+from rlinf.algorithms.event_intervention import EventInfluenceModel
+from rlinf.algorithms.event_value import (
+    OnlineEventValueSidecar,
+    infer_branch_future_event_values,
+    infer_event_sidecar_rollout,
+)
 from rlinf.config import SupportedModel
 from rlinf.data.schema.embodied_types import Trajectory, convert_trajectories_to_batch
 from rlinf.data.storage.lerobot import resolve_lerobot_repo_id
@@ -75,6 +80,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.entropy_op_type = self.cfg.algorithm.get("entropy_op_type", "torch")
         self._event_sidecar: OnlineEventValueSidecar | None = None
         self._event_value_optimizer: torch.optim.Optimizer | None = None
+        self._event_influence_model: EventInfluenceModel | None = None
+        self._event_influence_optimizer: torch.optim.Optimizer | None = None
+        self._event_branch_supervision_count = 0
 
         self.enable_sft_co_train = cfg.actor.get("enable_sft_co_train", False)
         self.version = 0
@@ -150,8 +158,115 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             lr=float(sidecar_cfg.get("value_lr", 1.0e-4)),
             weight_decay=float(sidecar_cfg.get("weight_decay", 0.0)),
         )
+        branch_cfg = self.cfg.algorithm.get("event_branch", {})
+        if int(branch_cfg.get("num_candidates", 0)):
+            representation_dim = self._event_sidecar.event_value.value[1].in_features
+            self._event_influence_model = EventInfluenceModel(
+                representation_dim,
+                self.cfg.actor.model.action_dim,
+                hidden_dim=int(branch_cfg.get("influence_hidden_dim", 256)),
+            ).to(self.device)
+            self._event_influence_optimizer = torch.optim.AdamW(
+                self._event_influence_model.parameters(),
+                lr=float(branch_cfg.get("influence_lr", 1.0e-4)),
+                weight_decay=float(branch_cfg.get("influence_weight_decay", 0.0)),
+            )
 
-    def _populate_learned_event_sidecar(self) -> torch.Tensor:
+    def _event_action_tensor(
+        self, *, chunks: int, batch: int, action_chunk: int, device: torch.device
+    ) -> torch.Tensor:
+        """Return rollout actions as ``[B,C*K,action_dim]`` for ``I_ξ``."""
+        actions = self.rollout_batch.get("actions")
+        if actions is None:
+            raise RuntimeError("Event Influence Model needs recorded executed actions")
+        action_dim = self.cfg.actor.model.action_dim
+        if actions.shape[:2] != (chunks, batch):
+            raise RuntimeError("recorded actions are not aligned to the event rollout")
+        if actions.shape[-1] != action_chunk * action_dim:
+            raise RuntimeError(
+                "Event Influence Model expects flattened executed actions with "
+                f"width {action_chunk * action_dim}, got {actions.shape[-1]}"
+            )
+        return actions.to(device).reshape(chunks, batch, action_chunk, action_dim).permute(
+            1, 0, 2, 3
+        ).reshape(batch, chunks * action_chunk, action_dim)
+
+    def _update_influence_from_branches(
+        self,
+        sidecar_rollout,
+        sidecar_curr_obs: dict[str, torch.Tensor],
+        *,
+        chunks: int,
+        batch: int,
+        action_chunk: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Train ``I_ξ`` on real branch labels and return PPO influences.
+
+        Only the first action in a selected policy chunk receives a direct
+        same-state label.  The model then amortizes this sparse evidence to all
+        actions in the event.  Before enough real labels exist, exact zeros
+        select uniform Event-SMDP credit rather than random causal scores.
+        """
+        if self._event_influence_model is None or self._event_influence_optimizer is None:
+            return torch.zeros(
+                (chunks, batch, action_chunk), device=self.rollout_batch["rewards"].device
+            ), None
+        actions = self._event_action_tensor(
+            chunks=chunks, batch=batch, action_chunk=action_chunk, device=device
+        )
+        representations = sidecar_rollout.action_representation[:, :-1]
+        prediction = self._event_influence_model(representations, actions).reshape(
+            batch, chunks, action_chunk
+        ).permute(1, 0, 2)
+        influence_loss = None
+        branch_mask = self.rollout_batch.get("branch_mask")
+        required_branch_fields = (
+            "branch_rewards",
+            "branch_horizons",
+            "branch_main_images",
+            "branch_wrist_images",
+        )
+        if branch_mask is not None and all(
+            self.rollout_batch.get(field) is not None for field in required_branch_fields
+        ):
+            mask = branch_mask.to(device).bool()
+            if mask.shape != (chunks, batch):
+                raise RuntimeError("branch supervision mask is not aligned to rollout chunks")
+            if bool(mask.any()):
+                future_values = infer_branch_future_event_values(
+                    self._event_sidecar,
+                    sidecar_curr_obs,
+                    self.rollout_batch["branch_main_images"].to(device),
+                    self.rollout_batch["branch_wrist_images"].to(device),
+                )
+                branch_rewards = self.rollout_batch["branch_rewards"].to(device)
+                branch_horizons = self.rollout_batch["branch_horizons"].to(device)
+                if branch_rewards.shape != future_values.shape or branch_horizons.shape != future_values.shape:
+                    raise RuntimeError("branch return tensors are inconsistent")
+                branch_returns = branch_rewards + torch.pow(
+                    torch.as_tensor(float(self.cfg.algorithm.get("gamma", 1.0)), device=device),
+                    branch_horizons,
+                ) * future_values
+                # Candidate 0 is the executed Flow-SDE trajectory.  Centering
+                # across matched candidates preserves beneficial and harmful
+                # signs in the signed Event-SMDP allocator.
+                target = branch_returns[..., 0] - branch_returns.mean(dim=-1)
+                influence_loss = EventInfluenceModel.loss(prediction[..., 0], target, mask)
+                self._event_influence_optimizer.zero_grad(set_to_none=True)
+                influence_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self._event_influence_model.parameters(), 1.0)
+                self._event_influence_optimizer.step()
+                self._event_branch_supervision_count += int(mask.sum().item())
+
+        minimum = int(self.cfg.algorithm.get("event_branch", {}).get("min_supervision", 1))
+        if self._event_branch_supervision_count < minimum:
+            allocated = torch.zeros_like(prediction)
+        else:
+            allocated = prediction.detach()
+        return allocated.to(self.rollout_batch["rewards"].device), influence_loss.detach() if influence_loss is not None else None
+
+    def _populate_learned_event_sidecar(self) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Attach learned online event values/IDs and update ``V_E`` once.
 
         The event representation is evaluated from RGB stored in the current
@@ -193,16 +308,20 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.rollout_batch["event_ids"] = sidecar_rollout.event_ids.to(rollout_device)
         self.rollout_batch["event_values"] = sidecar_rollout.event_values.to(rollout_device)
 
-        # The Influence Model is populated by sparse matched-state branches.
-        # Until it has branch supervision, exact zeros deliberately select the
-        # named uniform Event-SMDP ablation instead of inventing causal scores.
-        self.rollout_batch["intervention_influence"] = torch.zeros_like(
-            self.rollout_batch["event_ids"], dtype=self.rollout_batch["event_values"].dtype
-        )
-
         rewards = self.rollout_batch["rewards"]
         dones = self.rollout_batch["dones"]
         chunks, batch, action_chunk = rewards.shape
+        influence, influence_loss = self._update_influence_from_branches(
+            sidecar_rollout,
+            sidecar_curr_obs,
+            chunks=chunks,
+            batch=batch,
+            action_chunk=action_chunk,
+            device=sidecar_device,
+        )
+        self.rollout_batch["intervention_influence"] = influence.to(
+            dtype=self.rollout_batch["event_values"].dtype
+        )
         action_rewards = rewards.to(sidecar_device).transpose(1, 2).reshape(chunks * action_chunk, batch)
         action_dones = dones.to(sidecar_device).transpose(1, 2).reshape((chunks + 1) * action_chunk, batch)[
             -(chunks * action_chunk + 1) :
@@ -221,7 +340,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self._event_sidecar.event_value.parameters(), 1.0)
         self._event_value_optimizer.step()
-        return loss.detach()
+        return loss.detach(), influence_loss
 
     def model_provider_func(self) -> nn.Module:
         model = get_model(self.cfg.actor.model)
@@ -401,12 +520,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.compute_opd_teacher_logprobs()
 
         event_value_loss = None
+        influence_loss = None
         # A deployable RGB student + frozen Observer produces the online event
         # state.  ``V_E`` alone is updated from the present policy rollout.
         # This must run before advantage preprocessing so values/IDs retain
         # RLinf's native [chunk,batch,action] layout.
         if self.cfg.algorithm.get("event_value_source", None) == "learned_sidecar":
-            event_value_loss = self._populate_learned_event_sidecar()
+            event_value_loss, influence_loss = self._populate_learned_event_sidecar()
 
         # Phase-2 oracle control uses the already-collected π0.5 value head as
         # a temporary bootstrap proxy.  It is deliberately explicit in config;
@@ -486,6 +606,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
         if event_value_loss is not None:
             rollout_metrics["event/value_smdp_loss"] = event_value_loss.cpu()
+        if influence_loss is not None:
+            rollout_metrics["event/influence_loss"] = influence_loss.cpu()
+            rollout_metrics["event/branch_supervision_count"] = torch.tensor(
+                float(self._event_branch_supervision_count)
+            )
         return rollout_metrics
 
     @Worker.timer("actor/compute_opd_teacher_logprobs")

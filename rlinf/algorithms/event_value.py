@@ -254,3 +254,57 @@ def infer_event_sidecar_rollout(
         action_representation=action_representation,
         chunk_output=output,
     )
+
+
+@torch.no_grad()
+def infer_branch_future_event_values(
+    sidecar: OnlineEventValueSidecar,
+    curr_obs: Mapping[str, torch.Tensor],
+    branch_main_images: torch.Tensor,
+    branch_wrist_images: torch.Tensor,
+) -> torch.Tensor:
+    """Evaluate ``V_E(z_{t+H})`` for sparse matched-state branch endpoints.
+
+    Branch endpoints cannot be evaluated as isolated frames: the causal GRU
+    state must first see the exact online RGB prefix that existed at branch
+    time.  For every policy chunk this helper repeats that prefix for each
+    candidate, appends its returned endpoint image, and reads the final Event
+    Value.  The small number of selected branch states makes this explicit
+    implementation preferable to silently resetting temporal state.
+    """
+    required = {"main_images", "wrist_images"}
+    missing = required.difference(curr_obs)
+    if missing:
+        raise ValueError(f"branch Event Value requires current observations {sorted(missing)}")
+    head = curr_obs["main_images"]
+    wrist = _right_wrist_stream(curr_obs["wrist_images"])
+    if head.ndim != 5 or head.shape[-1] != 3:
+        raise ValueError("current main_images must be [time,batch,height,width,3]")
+    # branch wrist is [T,B,M,(camera),H,W,3].  Align it to the right-camera
+    # convention used by the RGB student.
+    if branch_wrist_images.ndim == 7:
+        branch_wrist = branch_wrist_images[:, :, :, -1]
+    elif branch_wrist_images.ndim == 6:
+        branch_wrist = branch_wrist_images
+    else:
+        raise ValueError("branch wrist RGB has invalid shape")
+    if branch_main_images.ndim != 6 or branch_main_images.shape[-1] != 3:
+        raise ValueError("branch main RGB must be [time,batch,candidates,height,width,3]")
+    chunks, batch, candidates = branch_main_images.shape[:3]
+    if head.shape[:2] != (chunks, batch) or branch_wrist.shape[:3] != (chunks, batch, candidates):
+        raise ValueError("branch RGB tensors are not aligned to current rollout observations")
+
+    values = []
+    for chunk_idx in range(chunks):
+        # [B,M,T,H,W,3] -> [B*M,T,H,W,3]
+        prefix_head = head[: chunk_idx + 1].permute(1, 0, 2, 3, 4)
+        prefix_wrist = wrist[: chunk_idx + 1].permute(1, 0, 2, 3, 4)
+        repeated_head = prefix_head[:, None].expand(-1, candidates, -1, -1, -1, -1)
+        repeated_wrist = prefix_wrist[:, None].expand(-1, candidates, -1, -1, -1, -1)
+        endpoint_head = branch_main_images[chunk_idx].unsqueeze(2)
+        endpoint_wrist = branch_wrist[chunk_idx].unsqueeze(2)
+        sequence_head = torch.cat((repeated_head, endpoint_head), dim=2).flatten(0, 1)
+        sequence_wrist = torch.cat((repeated_wrist, endpoint_wrist), dim=2).flatten(0, 1)
+        endpoint_values = sidecar.infer_images(sequence_head, sequence_wrist).values[:, -1]
+        values.append(endpoint_values.reshape(batch, candidates))
+    return torch.stack(values, dim=0)

@@ -64,6 +64,11 @@ class EmbodiedTrajectoryBuilder:
     versions: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
     event_ids: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
     event_progress: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
+    branch_rewards: list[torch.Tensor] = field(default_factory=list)
+    branch_horizons: list[torch.Tensor] = field(default_factory=list)
+    branch_mask: list[torch.Tensor] = field(default_factory=list)
+    branch_main_images: list[torch.Tensor] = field(default_factory=list)
+    branch_wrist_images: list[torch.Tensor] = field(default_factory=list)
     forward_inputs: list[dict[str, Any]] = field(
         default_factory=list
     )  # trajectory_length
@@ -98,6 +103,19 @@ class EmbodiedTrajectoryBuilder:
             self.event_ids.append(result.oracle_event_ids)
             if result.oracle_event_progress is not None:
                 self.event_progress.append(result.oracle_event_progress)
+        # Branch fields are emitted for every transition by the opt-in
+        # intervention executor; ``branch_mask`` records whether this chunk
+        # actually consumed cloned simulator steps.
+        for field_name, values in (
+            ("branch_rewards", self.branch_rewards),
+            ("branch_horizons", self.branch_horizons),
+            ("branch_mask", self.branch_mask),
+            ("branch_main_images", self.branch_main_images),
+            ("branch_wrist_images", self.branch_wrist_images),
+        ):
+            value = getattr(result, field_name)
+            if result.rewards is not None and value is not None:
+                values.append(value)
         if result.forward_inputs:
             self.forward_inputs.append(result.forward_inputs)
 
@@ -180,6 +198,11 @@ class EmbodiedTrajectoryBuilder:
         self.versions.clear()
         self.event_ids.clear()
         self.event_progress.clear()
+        self.branch_rewards.clear()
+        self.branch_horizons.clear()
+        self.branch_mask.clear()
+        self.branch_main_images.clear()
+        self.branch_wrist_images.clear()
         self.forward_inputs.clear()
         self.curr_obs.clear()
         self.next_obs.clear()
@@ -222,6 +245,15 @@ class EmbodiedTrajectoryBuilder:
             trajectory.event_progress = (
                 torch.stack(self.event_progress, dim=0).cpu().contiguous()
             )
+        for field_name, values in (
+            ("branch_rewards", self.branch_rewards),
+            ("branch_horizons", self.branch_horizons),
+            ("branch_mask", self.branch_mask),
+            ("branch_main_images", self.branch_main_images),
+            ("branch_wrist_images", self.branch_wrist_images),
+        ):
+            if values:
+                setattr(trajectory, field_name, torch.stack(values, dim=0).cpu().contiguous())
         if len(self.forward_inputs) > 0:
             trajectory.forward_inputs = stack_list_of_dict_tensor(self.forward_inputs)
             for key in trajectory.forward_inputs.keys():

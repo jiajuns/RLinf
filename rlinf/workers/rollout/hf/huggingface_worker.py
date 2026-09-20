@@ -77,6 +77,14 @@ class MultiStepRolloutWorker(Worker):
         self.collect_transitions = self.cfg.rollout.get("collect_transitions", False)
         self.enable_dagger = self.algorithm_cfg.get("loss_type") == "embodied_dagger"
         self.enable_opd = self.algorithm_cfg.get("adv_type") == "opd"
+        event_branch_cfg = self.algorithm_cfg.get("event_branch", {})
+        self.event_branch_candidates = int(event_branch_cfg.get("num_candidates", 0))
+        self.event_branch_interval = int(event_branch_cfg.get("chunk_interval", 0))
+        if self.event_branch_candidates not in (0,) and self.event_branch_candidates < 2:
+            raise ValueError("event_branch.num_candidates must be zero or at least two")
+        if self.event_branch_candidates and self.event_branch_interval < 1:
+            raise ValueError("event_branch.chunk_interval must be positive when branches are enabled")
+        self._event_branch_chunk_index = 0
         self.expert_model = None
         self.rlt_feature_model = None
         self.rlt_route = None
@@ -583,6 +591,7 @@ class MultiStepRolloutWorker(Worker):
         result: dict[str, Any],
         *,
         final_obs: dict[str, Any] | None = None,
+        branch_actions: torch.Tensor | None = None,
     ) -> PolicyOutput:
         intervene_flags = result.get("intervene_flags")
         if (
@@ -608,7 +617,38 @@ class MultiStepRolloutWorker(Worker):
                 float(self.version),
                 dtype=torch.float32,
             ),
+            branch_actions=branch_actions,
         )
+
+    def _sample_flow_sde_branches(
+        self,
+        env_obs: dict[str, Any],
+        primary_actions: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Draw matched-observation Flow-SDE action candidates sparsely.
+
+        Candidate zero is precisely the action chunk used by PPO.  The other
+        candidates call the same rollout model on the untouched observation,
+        so for π0.5's Flow-SDE configuration they differ only in sampler noise.
+        A periodic selector is used before the learned boundary frontend is
+        available in the rollout worker; the environment still records an
+        explicit mask so all branch interactions count in the final budget.
+        """
+        if not self.event_branch_candidates:
+            return None
+        selected = self._event_branch_chunk_index % self.event_branch_interval == 0
+        self._event_branch_chunk_index += 1
+        if not selected:
+            return None
+        candidates = [primary_actions]
+        for _ in range(self.event_branch_candidates - 1):
+            sampled, _ = self._predict_rollout_actions(env_obs)
+            if isinstance(sampled, np.ndarray):
+                sampled = torch.from_numpy(sampled)
+            candidates.append(sampled)
+        if any(candidate.shape != primary_actions.shape for candidate in candidates):
+            raise RuntimeError("Flow-SDE branch candidates have inconsistent action shapes")
+        return torch.stack(candidates, dim=1)
 
     def get_bootstrap_values(
         self, final_obs: dict[str, Any] | None
@@ -696,11 +736,15 @@ class MultiStepRolloutWorker(Worker):
                     rlt_switch_flags=env_output.get("rlt_switch_flags", None),
                     intervene_requested=env_output.get("intervene_flags", None),
                 )
+                branch_actions = self._sample_flow_sde_branches(
+                    env_output["obs"], actions
+                )
 
                 policy_output = self._build_policy_output(
                     actions,
                     result,
                     final_obs=env_output.get("final_obs", None),
+                    branch_actions=branch_actions,
                 )
                 self.send_to(
                     group_name=self.cfg.env.group_name,
@@ -992,6 +1036,7 @@ class MultiStepRolloutWorker(Worker):
         split_bootstrap_values = _split_optional_tensor(policy_output.bootstrap_values)
         split_intervene_flags = _split_optional_tensor(policy_output.intervene_flags)
         split_versions = _split_optional_tensor(policy_output.versions)
+        split_branch_actions = _split_optional_tensor(policy_output.branch_actions)
         split_forward_inputs = (
             [{} for _ in sizes]
             if not policy_output.forward_inputs
@@ -1014,6 +1059,7 @@ class MultiStepRolloutWorker(Worker):
                 intervene_flags=split_intervene_flags[idx],
                 forward_inputs=split_forward_inputs[idx],
                 versions=split_versions[idx],
+                branch_actions=split_branch_actions[idx],
             )
             for idx in range(len(sizes))
         ]

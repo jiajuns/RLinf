@@ -2317,6 +2317,7 @@ def test_policy_output_split_merge_invariant():
             "states": torch.arange(18, dtype=torch.float32).view(6, 3),
         },
         versions=torch.arange(6, dtype=torch.float32).view(6, 1),
+        branch_actions=torch.arange(6 * 3 * 2 * 2, dtype=torch.float32).view(6, 3, 2, 2),
     )
 
     worker = object.__new__(MultiStepRolloutWorker)
@@ -2335,6 +2336,7 @@ def test_policy_output_split_merge_invariant():
         merged.forward_inputs["states"], policy_output.forward_inputs["states"]
     )
     assert torch.equal(merged.versions, policy_output.versions)
+    assert torch.equal(merged.branch_actions, policy_output.branch_actions)
 
 
 def test_merge_env_outputs_with_partial_optional_fields():
@@ -2358,6 +2360,11 @@ def test_merge_env_outputs_with_partial_optional_fields():
         intervene_actions=torch.ones((3, 4), dtype=torch.float32),
         intervene_flags=torch.ones((3, 1), dtype=torch.bool),
         rlt_switch_flags=torch.ones((3, 1), dtype=torch.bool),
+        branch_rewards=torch.ones((3, 2), dtype=torch.float32),
+        branch_horizons=torch.full((3, 2), 10, dtype=torch.long),
+        branch_mask=torch.ones(3, dtype=torch.bool),
+        branch_main_images=torch.ones((3, 2, 4, 4, 3), dtype=torch.uint8),
+        branch_wrist_images=torch.ones((3, 2, 1, 4, 4, 3), dtype=torch.uint8),
     ).to_dict()
 
     merged = EnvOutput.merge_env_outputs([env_output_0, env_output_1])
@@ -2383,6 +2390,9 @@ def test_merge_env_outputs_with_partial_optional_fields():
     assert torch.equal(
         merged["rlt_switch_flags"][:2], torch.zeros((2, 1), dtype=torch.bool)
     )
+    assert merged["branch_rewards"].shape == (5, 2)
+    assert not merged["branch_mask"][:2].any()
+    assert merged["branch_horizons"][2:].eq(10).all()
 
 
 def test_buffer_pool_uses_best_fit_buffers_independent_of_tensor_order():

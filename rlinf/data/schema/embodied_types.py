@@ -57,6 +57,14 @@ class EnvOutput:
     # the Event-SMDP ablation, not VLA observations.
     oracle_event_ids: Optional[torch.Tensor] = None  # [B, action_chunk]
     oracle_event_progress: Optional[torch.Tensor] = None  # [B, action_chunk]
+    # Sparse matched-state Flow-SDE branch outcomes.  They are optional and
+    # intentionally separated from ordinary observations so base πRL traffic
+    # and memory remain unchanged.
+    branch_rewards: Optional[torch.Tensor] = None  # [B, candidates]
+    branch_horizons: Optional[torch.Tensor] = None  # [B, candidates]
+    branch_mask: Optional[torch.Tensor] = None  # [B]
+    branch_main_images: Optional[torch.Tensor] = None  # [B, candidates, H, W, 3]
+    branch_wrist_images: Optional[torch.Tensor] = None  # [B, candidates, (W), H, W, 3]
 
     def __post_init__(self):
         self.obs = put_tensor_device(self.obs, "cpu")
@@ -109,6 +117,16 @@ class EnvOutput:
             if self.oracle_event_progress is not None
             else None
         )
+        for name in (
+            "branch_rewards",
+            "branch_horizons",
+            "branch_mask",
+            "branch_main_images",
+            "branch_wrist_images",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(self, name, value.cpu().contiguous())
 
     def prepare_observations(self, obs: dict[str, Any]) -> dict[str, Any]:
         image_tensor = obs["main_images"] if "main_images" in obs else None
@@ -247,6 +265,21 @@ class EnvOutput:
             oracle_event_progress=_merge_optional_tensor_field(
                 "oracle_event_progress", allow_partial_none=True, fill_value=0.0
             ),
+            branch_rewards=_merge_optional_tensor_field(
+                "branch_rewards", allow_partial_none=True, fill_value=0.0
+            ),
+            branch_horizons=_merge_optional_tensor_field(
+                "branch_horizons", allow_partial_none=True, fill_value=0
+            ),
+            branch_mask=_merge_optional_tensor_field(
+                "branch_mask", allow_partial_none=True, fill_value=False
+            ),
+            branch_main_images=_merge_optional_tensor_field(
+                "branch_main_images", allow_partial_none=True, fill_value=0
+            ),
+            branch_wrist_images=_merge_optional_tensor_field(
+                "branch_wrist_images", allow_partial_none=True, fill_value=0
+            ),
         ).to_dict()
 
     def to_dict(self) -> dict[str, Any]:
@@ -267,6 +300,11 @@ class EnvOutput:
             "rlt_switch_flags": self.rlt_switch_flags,
             "oracle_event_ids": self.oracle_event_ids,
             "oracle_event_progress": self.oracle_event_progress,
+            "branch_rewards": self.branch_rewards,
+            "branch_horizons": self.branch_horizons,
+            "branch_mask": self.branch_mask,
+            "branch_main_images": self.branch_main_images,
+            "branch_wrist_images": self.branch_wrist_images,
         }
 
 
@@ -316,6 +354,10 @@ class PolicyOutput:
     intervene_flags: torch.Tensor = None  # [B, num_action_chunks]
     forward_inputs: dict[str, torch.Tensor] = field(default_factory=dict)
     versions: torch.Tensor = None  # [B, 1]
+    # [B, candidates, action_chunk, action_dim].  Candidate 0 is always the
+    # executed Flow-SDE draw; later candidates are independent draws from the
+    # same observation/state and are only used for controlled branches.
+    branch_actions: torch.Tensor = None
 
     def __post_init__(self):
         if self.actions is not None:
@@ -332,6 +374,8 @@ class PolicyOutput:
             self.forward_inputs = put_tensor_device(self.forward_inputs, "cpu")
         if self.versions is not None:
             self.versions = self.versions.cpu().contiguous()
+        if self.branch_actions is not None:
+            self.branch_actions = self.branch_actions.cpu().contiguous()
 
     @staticmethod
     def merge(
@@ -361,6 +405,7 @@ class PolicyOutput:
             intervene_flags=_merge_optional_tensor("intervene_flags"),
             forward_inputs=merged_forward_inputs,
             versions=_merge_optional_tensor("versions"),
+            branch_actions=_merge_optional_tensor("branch_actions"),
         )
 
 
@@ -379,6 +424,11 @@ class ChunkStepResult:
     versions: torch.Tensor = None  # [B, 1]
     oracle_event_ids: torch.Tensor = None  # [B, action_chunk]
     oracle_event_progress: torch.Tensor = None  # [B, action_chunk]
+    branch_rewards: torch.Tensor = None
+    branch_horizons: torch.Tensor = None
+    branch_mask: torch.Tensor = None
+    branch_main_images: torch.Tensor = None
+    branch_wrist_images: torch.Tensor = None
 
     def __post_init__(self):
         if self.actions is not None:
@@ -403,6 +453,16 @@ class ChunkStepResult:
             self.oracle_event_ids = self.oracle_event_ids.cpu().contiguous()
         if self.oracle_event_progress is not None:
             self.oracle_event_progress = self.oracle_event_progress.cpu().contiguous()
+        for name in (
+            "branch_rewards",
+            "branch_horizons",
+            "branch_mask",
+            "branch_main_images",
+            "branch_wrist_images",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(self, name, value.cpu().contiguous())
 
 
 @dataclass
@@ -428,6 +488,11 @@ class Trajectory:
     # replacement independent of the rollout transport path.
     event_ids: torch.Tensor = None
     event_progress: torch.Tensor = None
+    branch_rewards: torch.Tensor = None
+    branch_horizons: torch.Tensor = None
+    branch_mask: torch.Tensor = None
+    branch_main_images: torch.Tensor = None
+    branch_wrist_images: torch.Tensor = None
     forward_inputs: dict[str, Any] = field(default_factory=dict)
     curr_obs: dict[str, Any] = field(default_factory=dict)
     next_obs: dict[str, Any] = field(default_factory=dict)
