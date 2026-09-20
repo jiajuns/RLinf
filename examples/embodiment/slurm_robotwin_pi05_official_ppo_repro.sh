@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # RLinf RoboTwin π0.5 + PPO/GAE reproduction under the paper-wide 4-GPU profile.
-# Deliberately preserve all published algorithm defaults: 256
-# train envs, rollout_epoch=4, batch=2048/32, chunk-level GAE, update_epoch=5,
-# lr=5e-6, clip=0.2, and max_epochs=1000.
+# Preserve published algorithm defaults while halving only global parallelism:
+# 128 train envs and batch 1024/32 retain the upstream per-GPU load.
 #SBATCH --job-name=robotwin_pi05_official_ppo
 #SBATCH --partition=acd_ue
 #SBATCH --gres=gpu:4
@@ -38,6 +37,8 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
   runner.logger.log_path=/data/user/leviccdong/EKSF/outputs/robotwin_pi05_official_ppo \
   runner.logger.experiment_name=robotwin_adjust_bottle_pi05_official_ppo \
+  env.train.total_num_envs=128 \
+  actor.global_batch_size=1024 \
   env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" \

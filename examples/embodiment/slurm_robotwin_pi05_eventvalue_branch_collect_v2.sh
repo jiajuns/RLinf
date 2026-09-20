@@ -29,25 +29,26 @@ export ROBOT_PLATFORM=ALOHA
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
 
-export ROBOTWIN_BRANCH_COLLECT_EPOCHS="${ROBOTWIN_BRANCH_COLLECT_EPOCHS:-200}"
-export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-8}"
-export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-8}"
-export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-1}"
+# Four-GPU equivalent of the upstream eight-GPU recipe: retain the same
+# per-GPU rollout and micro-batch load while halving global envs/batch.
+export ROBOTWIN_BRANCH_COLLECT_EPOCHS="${ROBOTWIN_BRANCH_COLLECT_EPOCHS:-4}"
+export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-128}"
+export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-1024}"
+export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-32}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_event_branches_v2}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_branch_collect_v2}"
 
 cd "${ROBOTWIN_PATH}"
 source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 
-# RLinf requires save_interval to be divisible by val_check_interval.  The
-# short collector has no validation before epoch 100, but keeps a valid
-# checkpoint cadence for the formal 500+ state collection.
+# This phase is collection/pretraining, not policy evaluation.  Disable eval
+# while retaining a final resumable sidecar checkpoint at epoch four.
 exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   --config-path config --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
   runner.max_epochs="${ROBOTWIN_BRANCH_COLLECT_EPOCHS}" \
   runner.logger.log_path="${ROBOTWIN_LOG_PATH}" runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" \
-  runner.val_check_interval=100 runner.save_interval=100 \
-  env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" env.train.rollout_epoch=1 env.eval.total_num_envs=1 env.eval.rollout_epoch=1 \
+  runner.val_check_interval=-1 runner.save_interval=4 \
+  env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" env.train.rollout_epoch=4 env.eval.total_num_envs=128 env.eval.rollout_epoch=1 \
   env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   +rollout.unnorm_key=adjust_bottle +rollout.collect_transitions=true \
@@ -58,7 +59,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
   +algorithm.event_sidecar.value_lr=1.0e-4 +algorithm.event_sidecar.target_ema_decay=0.995 \
   +algorithm.event_sidecar.proprio_time_delta=5.0 \
-  +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=1 \
+  +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 \
   +algorithm.event_branch.horizon=10 +algorithm.event_branch.min_supervision=500 \
   +algorithm.event_branch.influence_lr=1.0e-4 \
   +algorithm.event_credit.granularity=chunk +algorithm.event_credit.max_lambda=0.0 \

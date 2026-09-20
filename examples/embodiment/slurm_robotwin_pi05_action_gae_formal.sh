@@ -38,13 +38,13 @@ export HYDRA_FULL_ERROR=1
 # These defaults preserve a 200-step RoboTwin episode.  They are deliberately
 # small enough for a one-H100 reproducibility run; scaling must adjust baseline
 # and Event-SMDP together.
-export ROBOTWIN_MAX_EPOCHS="${ROBOTWIN_MAX_EPOCHS:-100}"
-export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-8}"
-export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-8}"
-export ROBOTWIN_ROLLOUT_EPOCHS="${ROBOTWIN_ROLLOUT_EPOCHS:-1}"
-export ROBOTWIN_EVAL_ROLLOUT_EPOCHS="${ROBOTWIN_EVAL_ROLLOUT_EPOCHS:-8}"
-export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-8}"
-export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-1}"
+export ROBOTWIN_MAX_EPOCHS="${ROBOTWIN_MAX_EPOCHS:-1000}"
+export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-128}"
+export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-128}"
+export ROBOTWIN_ROLLOUT_EPOCHS="${ROBOTWIN_ROLLOUT_EPOCHS:-4}"
+export ROBOTWIN_EVAL_ROLLOUT_EPOCHS="${ROBOTWIN_EVAL_ROLLOUT_EPOCHS:-1}"
+export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-1024}"
+export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-32}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_pi05_gae}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_pi05_flow_sde_action_gae}"
 # Conservative πRL control for the V2 comparison.  Override these with the
