@@ -5,12 +5,15 @@
 # writes; the roots are merged only after all receipts are successful.
 #SBATCH --job-name=rw_observe_materialize
 #SBATCH --partition=acd_u
+# ACD's scheduler requires every job in this partition to declare a GPU even
+# though this materialization process is CPU/I/O-only.
+#SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=06:00:00
-#SBATCH --array=0-9%5
+#SBATCH --array=0-9%2
 #SBATCH --output=/data/user/leviccdong/EKSF/outputs/robotwin_event_observer/materialize_%A_%a.out
 #SBATCH --error=/data/user/leviccdong/EKSF/outputs/robotwin_event_observer/materialize_%A_%a.err
 
