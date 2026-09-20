@@ -81,7 +81,17 @@ class RoboTwinEnv(gym.Env):
         mp.set_start_method("spawn", force=True)
         os.environ["ASSETS_PATH"] = self.cfg.assets_path
 
-        from robotwin.envs.vector_env import VectorEnv
+        # RoboTwin is distributed in two layouts: the pip package exposes
+        # ``robotwin.envs``, while the official source/runtime archive exposes
+        # ``envs`` directly at its root.  RL behavior is identical; accepting
+        # both layouts makes a source checkout usable without fabricating a
+        # package or changing the task implementation.
+        try:
+            from robotwin.envs.vector_env import VectorEnv
+        except ModuleNotFoundError as exc:
+            if exc.name != "robotwin":
+                raise
+            from envs.vector_env import VectorEnv
 
         env_seeds = self.reset_state_ids.tolist()
 
