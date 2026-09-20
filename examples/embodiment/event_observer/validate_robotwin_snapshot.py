@@ -13,7 +13,7 @@ from rlinf.envs.sim.robotwin.robotwin_env import RoboTwinEnv
 
 
 def assert_state_equal(left: dict, right: dict) -> None:
-    for key in ("states",):
+    for key in ("states", "measured_state16"):
         a, b = left.get(key), right.get(key)
         if a is None or b is None:
             if a is not b:
@@ -68,7 +68,12 @@ def main() -> None:
     sys.path.insert(0, str(args.robotwin_source))
     env = RoboTwinEnv(cfg.env.train, num_envs=1, seed_offset=0, total_num_processes=1, worker_info={})
     try:
-        env.reset()
+        initial_obs, _ = env.reset()
+        if initial_obs.get("measured_state16") is None or initial_obs["measured_state16"].shape != (1, 16):
+            raise AssertionError("RoboTwin online observer did not receive measured_state16")
+        branch = env.branch_step(torch.zeros((1, 2, 1, 14), dtype=torch.float32), horizon=1)
+        if not bool(branch["branch_mask"].all()) or branch["branch_measured_state16"].shape != (1, 2, 16):
+            raise AssertionError("matched-state branch did not return measured state")
         snapshot = env.get_state()
         action = torch.zeros((1, 1, 14), dtype=torch.float32)
         first_obs, first_reward, first_term, first_trunc, _ = env.step(action, auto_reset=False)
@@ -86,6 +91,7 @@ def main() -> None:
         assert_state_equal(first_obs, second_obs)
         print({"snapshot_bytes": len(snapshot), "same_action_branch_physics": "exact", "shader": args.shader,
                "denoiser_disabled": args.disable_denoiser,
+               "branch_candidates": int(branch["branch_rewards"].shape[1]),
                "reward": first_reward.cpu().tolist(),
                "rgb_mismatch_fraction": image_mismatch_fraction(first_obs, second_obs)})
     finally:
