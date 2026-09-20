@@ -19,6 +19,8 @@ export PYTHONPATH="$REPO:$SOURCE:${PYTHONPATH:-}"
 export EMBODIED_PATH="$REPO/examples/embodiment"
 export REPO_PATH="$REPO"
 export ASSETS_PATH="$ASSETS"
+export VK_DRIVER_FILES="$ROOT/env_etsf/lib/python3.10/site-packages/sapien/vulkan_library/nvidia_icd.json"
+export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
 cd "$SOURCE"
 python -u "$REPO/examples/embodiment/event_observer/validate_robotwin_snapshot.py" \
-  --repo "$REPO" --robotwin-assets "$ASSETS" --robotwin-source "$SOURCE"
+  --repo "$REPO" --robotwin-assets "$ASSETS" --robotwin-source "$SOURCE" --shader minimal

@@ -27,10 +27,27 @@ def main() -> None:
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--robotwin-assets", type=Path, required=True)
     parser.add_argument("--robotwin-source", type=Path, required=True)
+    parser.add_argument("--shader", choices=("minimal", "default", "rt"), default="minimal")
     args = parser.parse_args()
     os.environ.setdefault("EMBODIED_PATH", str(args.repo / "examples/embodiment"))
     os.environ.setdefault("REPO_PATH", str(args.repo))
     os.environ["ASSETS_PATH"] = str(args.robotwin_assets)
+    # RoboTwin hard-codes ray tracing plus OIDN in BaseTask.setup_scene.  That
+    # path changes RGB on restore even when PhysX is byte-identical.  Branch
+    # interventions need a deterministic observation function, so intercept
+    # the setup-time renderer selection before any task instance is created.
+    import sapien
+    set_shader = sapien.render.set_camera_shader_dir
+    set_shader_original = set_shader
+
+    def choose_deterministic_shader(_requested: str) -> None:
+        set_shader_original(args.shader)
+
+    sapien.render.set_camera_shader_dir = choose_deterministic_shader
+    if args.shader != "rt":
+        sapien.render.set_ray_tracing_samples_per_pixel = lambda *_args, **_kwargs: None
+        sapien.render.set_ray_tracing_path_depth = lambda *_args, **_kwargs: None
+        sapien.render.set_ray_tracing_denoiser = lambda *_args, **_kwargs: None
     with initialize_config_dir(version_base="1.1", config_dir=str(args.repo / "examples/embodiment/config")):
         cfg = compose(
             config_name="robotwin_adjust_bottle_ppo_openpi_pi05",
@@ -61,7 +78,8 @@ def main() -> None:
         torch.testing.assert_close(first_term.cpu(), second_term.cpu(), rtol=0, atol=0)
         torch.testing.assert_close(first_trunc.cpu(), second_trunc.cpu(), rtol=0, atol=0)
         assert_observation_equal(first_obs, second_obs)
-        print({"snapshot_bytes": len(snapshot), "same_action_branch": "exact", "reward": first_reward.cpu().tolist()})
+        print({"snapshot_bytes": len(snapshot), "same_action_branch": "exact", "shader": args.shader,
+               "reward": first_reward.cpu().tolist()})
     finally:
         env.offload(clear_cache=True)
 
