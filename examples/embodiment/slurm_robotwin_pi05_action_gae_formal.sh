@@ -41,7 +41,10 @@ export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/output
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_pi05_flow_sde_action_gae}"
 
 cd "${REPO_PATH}"
-source /data/user/leviccdong/EKSF/env_pirl_pi05/bin/activate
+# This is a conda-prefix environment on the HPC, not a venv (there is no
+# ``bin/activate`` inside it).  Match the environment activation used by the
+# already-running ManiSkill πRL jobs.
+source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 
 exec python examples/embodiment/train_embodied_agent.py \
   --config-path examples/embodiment/config \
