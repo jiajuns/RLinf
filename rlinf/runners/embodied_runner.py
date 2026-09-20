@@ -72,6 +72,9 @@ class EmbodiedRunner:
         self.critic = critic
         self.reward = reward
         self.weight_sync_interval = self.cfg.runner.weight_sync_interval
+        self.only_eval = bool(self.cfg.runner.get("only_eval", False)) or (
+            self.cfg.runner.get("task_type") == "embodied_eval"
+        )
         self.overlap_env_bootstrap = bool(
             self.cfg.runner.get("overlap_env_bootstrap", False)
         )
@@ -171,6 +174,11 @@ class EmbodiedRunner:
 
         rollout_handle.wait()
         env_handle.wait()
+        if self.actor is None:
+            if self.cfg.runner.get("resume_dir", None) is not None:
+                raise ValueError("runner.resume_dir is not supported with runner.only_eval")
+            return
+
         self.actor.init_worker().wait()
 
         resume_dir = self.cfg.runner.get("resume_dir", None)
@@ -477,6 +485,17 @@ class EmbodiedRunner:
         self.logger.info(f"Closed profiling window at step {step_idx}")
 
     def run(self):
+        if self.only_eval:
+            start_time = time.time()
+            with self.timer("eval"):
+                eval_metrics = {f"eval/{k}": v for k, v in self.evaluate().items()}
+            time_metrics = {f"time/{k}": v for k, v in self.timer.consume_durations().items()}
+            metrics = {**time_metrics, **eval_metrics}
+            self.metric_logger.log(metrics, step=0)
+            self.print_metrics_table_async(0, 1, start_time, metrics)
+            self._finish_run()
+            return
+
         if self.cfg.runner.get("use_training_pipeline", False):
             return self.run_pipeline()
 
