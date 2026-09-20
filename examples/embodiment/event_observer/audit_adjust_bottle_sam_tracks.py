@@ -9,13 +9,24 @@ manifest is the sole input to cache construction.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
 
 
-def track_health(path: Path, *, min_visible_fraction: float, min_box_area: float) -> tuple[bool, dict]:
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def track_health(
+    path: Path, *, episode: Path | None = None, min_visible_fraction: float, min_box_area: float
+) -> tuple[bool, dict]:
     with np.load(path, allow_pickle=False) as data:
         required = {"format", "cameras", "tracks", "episode_sha256", "checkpoint_sha256"}
         missing = required.difference(data.files)
@@ -23,6 +34,9 @@ def track_health(path: Path, *, min_visible_fraction: float, min_box_area: float
             return False, {"reason": f"invalid_format_or_missing:{sorted(missing)}"}
         cameras = tuple(map(str, data["cameras"]))
         tracks = np.asarray(data["tracks"], np.float32)
+        episode_sha256 = str(data["episode_sha256"])
+    if episode is not None and file_sha256(episode) != episode_sha256:
+        return False, {"reason": "episode_track_hash_mismatch"}
     if tracks.ndim != 3 or tracks.shape[0] != len(cameras) or tracks.shape[-1] != 6:
         return False, {"reason": "invalid_track_shape", "shape": list(tracks.shape)}
     if "head_camera" not in cameras:
@@ -70,7 +84,9 @@ def main() -> None:
         if not track.is_file():
             ok, info = False, {"reason": "track_missing"}
         else:
-            ok, info = track_health(track, min_visible_fraction=args.min_visible_fraction, min_box_area=args.min_box_area)
+            ok, info = track_health(
+                track, episode=episode, min_visible_fraction=args.min_visible_fraction, min_box_area=args.min_box_area
+            )
         row = {"episode": str(episode), "track": str(track), "accepted": ok, **info}
         rows.append(row)
         if ok:
