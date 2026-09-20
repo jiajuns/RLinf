@@ -79,6 +79,10 @@ PIRL_ENV_GPU="${PIRL_ENV_GPU:-}"
 # batched CUDA-camera allocation; it keeps the same RGB+segmentation
 # observation, but is intentionally benchmarked for throughput before use.
 PIRL_RENDER_BACKEND="${PIRL_RENDER_BACKEND:-}"
+# ``physx_cpu`` is valid only with one environment.  It is used exclusively
+# for the renderer-independent end-to-end compatibility smoke, never for a
+# throughput comparison with GPU-parallel ManiSkill.
+PIRL_SIM_BACKEND="${PIRL_SIM_BACKEND:-}"
 
 extra_overrides=()
 if [[ -n "$PIRL_REWARD_TYPE" ]]; then
@@ -98,6 +102,14 @@ if [[ -n "$PIRL_RENDER_BACKEND" ]]; then
   render_overrides+=(
     "+env.train.init_params.render_backend=${PIRL_RENDER_BACKEND}"
     "+env.eval.init_params.render_backend=${PIRL_RENDER_BACKEND}"
+  )
+fi
+
+sim_overrides=()
+if [[ -n "$PIRL_SIM_BACKEND" ]]; then
+  sim_overrides+=(
+    "env.train.init_params.sim_backend=${PIRL_SIM_BACKEND}"
+    "env.eval.init_params.sim_backend=${PIRL_SIM_BACKEND}"
   )
 fi
 
@@ -125,4 +137,5 @@ python examples/embodiment/train_embodied_agent.py \
   env.train.event_oracle.enabled=false \
   "${placement_overrides[@]}" \
   "${render_overrides[@]}" \
+  "${sim_overrides[@]}" \
   "${extra_overrides[@]}"
