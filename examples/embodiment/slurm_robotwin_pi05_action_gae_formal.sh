@@ -48,10 +48,12 @@ source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 
 # Hydra resolves config paths relative to train_embodied_agent.py's directory.
 # Passing examples/embodiment/config here therefore produced a duplicated
-# examples/embodiment/examples/embodiment/config path on the HPC.
+# examples/embodiment/examples/embodiment/config path on the HPC.  The
+# upstream recipe is itself a Hydra primary config (it owns hydra.searchpath),
+# so retain it as the primary and apply this fair-credit overlay as CLI flags.
 exec python examples/embodiment/train_embodied_agent.py \
   --config-path config \
-  --config-name robotwin_adjust_bottle_ppo_openpi_pi05_action_gae \
+  --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
   runner.max_epochs="${ROBOTWIN_MAX_EPOCHS}" \
   runner.logger.log_path="${ROBOTWIN_LOG_PATH}" \
   runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" \
@@ -65,5 +67,13 @@ exec python examples/embodiment/train_embodied_agent.py \
   env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
+  rollout.unnorm_key=adjust_bottle \
+  algorithm.reward_type=action_level \
+  algorithm.logprob_type=action_level \
+  algorithm.adv_type=gae \
+  algorithm.loss_type=actor_critic \
+  actor.model.openpi.noise_method=flow_sde \
+  actor.model.openpi.joint_logprob=false \
+  actor.model.openpi.value_after_vlm=true \
   actor.global_batch_size="${ROBOTWIN_GLOBAL_BATCH}" \
   actor.micro_batch_size="${ROBOTWIN_MICRO_BATCH}"
