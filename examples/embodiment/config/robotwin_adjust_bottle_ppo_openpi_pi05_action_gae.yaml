@@ -1,0 +1,35 @@
+# Fair πRL control for the RoboTwin Event-Value study.
+#
+# This deliberately composes the upstream-ready RoboTwin π0.5 PPO recipe and
+# changes only the credit granularity from chunk to executed-action.  The full
+# Event-SMDP method must use this exact file as its PPO/Flow-SDE parent so that
+# the credit estimator is the sole algorithmic variable.
+defaults:
+  - robotwin_adjust_bottle_ppo_openpi_pi05
+  - _self_
+
+runner:
+  logger:
+    experiment_name: robotwin_adjust_bottle_pi05_flow_sde_action_gae
+
+algorithm:
+  # Preserve an action axis for both the official GAE control and the later
+  # Event-SMDP / EVI variants.  The underlying optimizer, PPO clipping and
+  # Flow-SDE likelihood remain the upstream recipe's settings.
+  reward_type: action_level
+  logprob_type: action_level
+  adv_type: gae
+  loss_type: actor_critic
+
+rollout:
+  # Required by the OpenPI action normalizer; it must agree with the SFT
+  # checkpoint, rather than inheriting an unrelated LIBERO key.
+  unnorm_key: adjust_bottle
+
+actor:
+  model:
+    openpi:
+      noise_method: flow_sde
+      joint_logprob: false
+      value_after_vlm: true
+
