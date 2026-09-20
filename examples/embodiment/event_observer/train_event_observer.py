@@ -9,6 +9,7 @@ PPO able to load the small observer checkpoint without importing SAM.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 from dataclasses import asdict, dataclass
@@ -50,7 +51,11 @@ class CachedEpisodes(Dataset):
         "state_change_target", "valid_mask", "rewards", "dones",
     }
 
-    def __init__(self, root: Path, holdout_tasks: set[str], validation: bool) -> None:
+    def __init__(
+        self, root: Path, holdout_tasks: set[str], validation: bool, episode_validation_fraction: float = 0.0
+    ) -> None:
+        if not 0.0 <= episode_validation_fraction < 1.0:
+            raise ValueError("episode_validation_fraction must be in [0, 1)")
         self.paths = []
         for path in sorted(root.rglob("*.npz")):
             with np.load(path, allow_pickle=False) as data:
@@ -58,7 +63,15 @@ class CachedEpisodes(Dataset):
                 if missing:
                     raise ValueError(f"{path} lacks cache fields: {sorted(missing)}")
                 task = str(data.get("task", ""))
-            if (task in holdout_tasks) == validation:
+            task_selected = (task in holdout_tasks) == validation
+            # A task-held-out split is the only valid generalization metric
+            # for multi-task training.  A one-task adjust_bottle run cannot
+            # form that split, so it may request a deterministic episode split
+            # solely as an optimization/overfit diagnostic.
+            if not holdout_tasks and episode_validation_fraction:
+                bucket = int(hashlib.sha256(path.name.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+                task_selected = (bucket < episode_validation_fraction) == validation
+            if task_selected:
                 self.paths.append(path)
         if not self.paths:
             split = "validation" if validation else "training"
@@ -133,6 +146,8 @@ def main() -> None:
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--holdout-tasks", default="")
+    parser.add_argument("--episode-validation-fraction", type=float, default=0.0,
+                        help="single-task diagnostic split; not a generalization claim")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -141,8 +156,11 @@ def main() -> None:
     args = parser.parse_args()
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     held_out = {task for task in args.holdout_tasks.split(",") if task}
-    train = CachedEpisodes(args.cache, held_out, validation=False)
-    validation = CachedEpisodes(args.cache, held_out, validation=True) if held_out else None
+    train = CachedEpisodes(args.cache, held_out, validation=False, episode_validation_fraction=args.episode_validation_fraction)
+    validation = (
+        CachedEpisodes(args.cache, held_out, validation=True, episode_validation_fraction=args.episode_validation_fraction)
+        if held_out or args.episode_validation_fraction else None
+    )
     feature_dim = train[0].features.shape[-1]
     posterior_dim = train[0].posterior_target.shape[-1]
     state_dim = int(max(item.state_target.max().item() for item in (train[index] for index in range(len(train)))) + 1)
