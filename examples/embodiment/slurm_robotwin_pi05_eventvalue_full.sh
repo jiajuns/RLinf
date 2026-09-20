@@ -67,7 +67,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   +rollout.unnorm_key=adjust_bottle \
-  rollout.collect_transitions=true \
+  +rollout.collect_transitions=true \
   algorithm.reward_type=action_level \
   algorithm.logprob_type=action_level \
   algorithm.adv_type=event_smdp_interventional \
