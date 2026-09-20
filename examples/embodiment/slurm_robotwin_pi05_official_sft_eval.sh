@@ -17,6 +17,7 @@ export RLINF_LOCAL_RAY=1
 unset RAY_ADDRESS
 export RLINF_RAY_TMPDIR="/tmp/rlinf_ray_${SLURM_JOB_ID:?}"
 export RLINF_COMPONENT_PLACEMENT=0-3
+export RLINF_EVAL_COMPONENT_PLACEMENT=0-3
 export REPO_PATH="${REPO_PATH:-/data/user/leviccdong/EKSF/code/RLinf-piRL}"
 export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
 export ROBOTWIN_PATH="${ROBOTWIN_PATH:-/data/user/leviccdong/EKSF/runtime/RoboTwin-RLinf_support}"

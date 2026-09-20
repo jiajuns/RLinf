@@ -13,7 +13,9 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    env, rollout: 0-7
+    # Keep the official eight-GPU default, while allowing the paper-wide
+    # four-GPU profile to set RLINF_EVAL_COMPONENT_PLACEMENT=0-3.
+    env, rollout: ${oc.env:RLINF_EVAL_COMPONENT_PLACEMENT,"0-7"}
 
 runner:
   task_type: embodied_eval
