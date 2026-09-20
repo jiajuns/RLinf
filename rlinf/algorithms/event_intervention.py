@@ -11,6 +11,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 import torch
+from torch import nn
 
 
 class SnapshotEnvironment(Protocol):
@@ -24,6 +25,70 @@ class SnapshotEnvironment(Protocol):
 
 
 BranchRollout = Callable[[Any], tuple[torch.Tensor, torch.Tensor, int]]
+
+
+class EventInfluenceModel(nn.Module):
+    """Amortize sparse matched-state branch evidence over all event actions.
+
+    The model is intentionally small and independent of the π0.5 actor.  Its
+    inputs are an online-capable observer representation, the executed action,
+    and optional deployment-time state features.  Real simulator branches
+    supervise it with centered ``I(s,a,z^E)`` values; PPO then queries it at
+    every action in the event without running additional branches.
+    """
+
+    def __init__(
+        self,
+        event_representation_dim: int,
+        action_dim: int,
+        *,
+        state_dim: int = 0,
+        hidden_dim: int = 256,
+    ) -> None:
+        super().__init__()
+        if min(event_representation_dim, action_dim, hidden_dim) < 1 or state_dim < 0:
+            raise ValueError("Influence Model dimensions must be valid")
+        self.event_representation_dim = event_representation_dim
+        self.action_dim = action_dim
+        self.state_dim = state_dim
+        self.network = nn.Sequential(
+            nn.LayerNorm(event_representation_dim + action_dim + state_dim),
+            nn.Linear(event_representation_dim + action_dim + state_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(
+        self,
+        event_representation: torch.Tensor,
+        actions: torch.Tensor,
+        state_features: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if event_representation.shape[:-1] != actions.shape[:-1]:
+            raise ValueError("event representation and action prefixes must match")
+        if event_representation.shape[-1] != self.event_representation_dim or actions.shape[-1] != self.action_dim:
+            raise ValueError("Influence Model input dimensions do not match construction")
+        values = [event_representation, actions]
+        if self.state_dim:
+            if state_features is None or state_features.shape != (*actions.shape[:-1], self.state_dim):
+                raise ValueError("state_features must match the configured prefix and state_dim")
+            values.append(state_features)
+        elif state_features is not None:
+            raise ValueError("state_features were passed but state_dim is zero")
+        return self.network(torch.cat(values, dim=-1)).squeeze(-1)
+
+    @staticmethod
+    def loss(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        if prediction.shape != target.shape:
+            raise ValueError("influence prediction and target shapes must match")
+        error = (prediction - target).square()
+        if mask is None:
+            return error.mean()
+        if mask.shape != prediction.shape or not bool(mask.any()):
+            raise ValueError("influence supervision mask must match and select data")
+        return error.masked_select(mask.bool()).mean()
 
 
 def _restore_snapshot(environment: SnapshotEnvironment, state: Any) -> None:
