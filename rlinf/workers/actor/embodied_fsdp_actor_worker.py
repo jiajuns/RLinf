@@ -151,8 +151,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         rgb_student_checkpoint = sidecar_cfg.get("rgb_student_checkpoint", None)
         if not observer_checkpoint or not rgb_student_checkpoint:
             raise ValueError("event_sidecar needs observer_checkpoint and rgb_student_checkpoint")
+        # RLinf stores the local device as an integer rank in this worker,
+        # whereas ``torch.load(map_location=...)`` requires a device-like
+        # value.  Keep the conversion local to the auxiliary Event sidecar so
+        # the upstream actor device convention remains untouched.
+        sidecar_device = (
+            torch.device(f"cuda:{self.device}")
+            if isinstance(self.device, int)
+            else torch.device(self.device)
+        )
         self._event_sidecar = OnlineEventValueSidecar.from_checkpoints(
-            observer_checkpoint, rgb_student_checkpoint, device=self.device
+            observer_checkpoint, rgb_student_checkpoint, device=sidecar_device
         )
         self._event_value_optimizer = torch.optim.AdamW(
             self._event_sidecar.event_value.parameters(),
@@ -166,7 +175,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 representation_dim,
                 self.cfg.actor.model.action_dim,
                 hidden_dim=int(branch_cfg.get("influence_hidden_dim", 256)),
-            ).to(self.device)
+            ).to(sidecar_device)
             self._event_influence_optimizer = torch.optim.AdamW(
                 self._event_influence_model.parameters(),
                 lr=float(branch_cfg.get("influence_lr", 1.0e-4)),
