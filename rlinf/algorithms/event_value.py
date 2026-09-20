@@ -16,7 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from rlinf.algorithms.event_credit import event_smdp_credit
-from rlinf.models.embodiment.event_observer import EventObserver, EventValueCritic
+from rlinf.models.embodiment.event_observer import EventObserver, EventValueCritic, RGBRoleFeatureStudent
 
 
 @dataclass(frozen=True)
@@ -34,10 +34,13 @@ class EventSidecarOutput:
 class OnlineEventValueSidecar(nn.Module):
     """Frozen observer plus an online-updated SMDP Event Value Critic."""
 
-    def __init__(self, observer: EventObserver, event_value: EventValueCritic) -> None:
+    def __init__(
+        self, observer: EventObserver, event_value: EventValueCritic, rgb_student: RGBRoleFeatureStudent | None = None
+    ) -> None:
         super().__init__()
         self.observer = observer
         self.event_value = event_value
+        self.rgb_student = rgb_student
         self.freeze_observer()
 
     @classmethod
@@ -57,10 +60,40 @@ class OnlineEventValueSidecar(nn.Module):
         value.load_state_dict(checkpoint["event_value"])
         return cls(observer, value).to(device)
 
+    @classmethod
+    def from_checkpoints(
+        cls, event_checkpoint: str | Path, rgb_student_checkpoint: str | Path, *, device: torch.device | str = "cpu"
+    ) -> "OnlineEventValueSidecar":
+        """Load a deployable RGB→Event Observer→Event Value sidecar."""
+        sidecar = cls.from_checkpoint(event_checkpoint, device=device)
+        checkpoint = torch.load(Path(rgb_student_checkpoint), map_location=device, weights_only=True)
+        if "rgb_student" not in checkpoint or int(checkpoint.get("feature_dim", -1)) != sidecar.observer.feature_dim:
+            raise ValueError("RGB student checkpoint is incompatible with Event Observer feature_dim")
+        student = RGBRoleFeatureStudent(sidecar.observer.feature_dim)
+        student.load_state_dict(checkpoint["rgb_student"])
+        sidecar.rgb_student = student.to(device)
+        for parameter in sidecar.rgb_student.parameters():
+            parameter.requires_grad_(False)
+        sidecar.rgb_student.eval()
+        return sidecar
+
     def freeze_observer(self) -> None:
         self.observer.eval()
         for parameter in self.observer.parameters():
             parameter.requires_grad_(False)
+        if self.rgb_student is not None:
+            self.rgb_student.eval()
+            for parameter in self.rgb_student.parameters():
+                parameter.requires_grad_(False)
+
+    @torch.no_grad()
+    def infer_images(
+        self, head_images: torch.Tensor, wrist_images: torch.Tensor, *, boundary_threshold: float = 0.5
+    ) -> EventSidecarOutput:
+        """Run the online RGB student then the frozen Event Observer."""
+        if self.rgb_student is None:
+            raise RuntimeError("infer_images requires an RGB student checkpoint")
+        return self.infer(self.rgb_student(head_images, wrist_images), boundary_threshold=boundary_threshold)
 
     @torch.no_grad()
     def infer(

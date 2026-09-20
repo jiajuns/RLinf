@@ -1,7 +1,7 @@
 import torch
 
 from rlinf.algorithms.event_value import OnlineEventValueSidecar
-from rlinf.models.embodiment.event_observer import EventObserver, EventValueCritic
+from rlinf.models.embodiment.event_observer import EventObserver, EventValueCritic, RGBRoleFeatureStudent
 
 
 def test_frozen_observer_infers_local_event_ids_and_online_value_loss():
@@ -20,3 +20,14 @@ def test_frozen_observer_infers_local_event_ids_and_online_value_loss():
     event_ids = torch.tensor([[0, 0], [0, 0], [1, 1], [1, 1]])
     loss = sidecar.smdp_value_loss(representation, rewards, dones, event_ids, gamma=0.99)
     assert torch.isfinite(loss) and loss.item() >= 0
+
+
+def test_event_sidecar_can_use_a_frozen_rgb_student_online():
+    observer = EventObserver(30, 3, 4, hidden_dim=8, num_geometric_primitives=2, num_state_change_primitives=1)
+    sidecar = OnlineEventValueSidecar(observer, EventValueCritic(8, hidden_dim=8),
+                                      RGBRoleFeatureStudent(30, hidden_dim=8, image_size=(32, 32)))
+    output = sidecar.infer_images(
+        torch.randint(0, 255, (1, 2, 40, 40, 3), dtype=torch.uint8),
+        torch.randint(0, 255, (1, 2, 40, 40, 3), dtype=torch.uint8),
+    )
+    assert output.values.shape == (1, 2)
