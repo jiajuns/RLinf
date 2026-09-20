@@ -128,7 +128,7 @@ class RoboTwinEnv(gym.Env):
         if branch_actions.shape[0] != self.num_envs or not 1 <= horizon <= branch_actions.shape[2]:
             raise ValueError("branch action batch/horizon is incompatible with RoboTwinEnv")
         snapshot = self.get_state()
-        rewards, main_images, wrist_images = [], [], []
+        rewards, main_images, wrist_images, measured_states = [], [], [], []
         try:
             for candidate_idx in range(branch_actions.shape[1]):
                 self.load_state(snapshot)
@@ -141,6 +141,10 @@ class RoboTwinEnv(gym.Env):
                 if wrist is None:
                     raise RuntimeError("RoboTwin Event branches require wrist RGB")
                 wrist_images.append(wrist.detach().cpu())
+                measured = obs.get("measured_state16")
+                if measured is None:
+                    raise RuntimeError("RoboTwin Event branches require measured proprioception")
+                measured_states.append(measured.detach().cpu())
         finally:
             self.load_state(snapshot)
         candidates = branch_actions.shape[1]
@@ -152,6 +156,7 @@ class RoboTwinEnv(gym.Env):
             "branch_mask": torch.ones(self.num_envs, dtype=torch.bool),
             "branch_main_images": torch.stack(main_images, dim=1),
             "branch_wrist_images": torch.stack(wrist_images, dim=1),
+            "branch_measured_state16": torch.stack(measured_states, dim=1),
         }
 
     @property
@@ -223,12 +228,48 @@ class RoboTwinEnv(gym.Env):
             image = center_crop_image(image)
         return np.array(image)
 
+    @staticmethod
+    def _measured_gripper_opening(robot, arm: str) -> float:
+        """Read physical gripper qpos, never its drive target/action command."""
+        entity = robot.left_entity if arm == "left" else robot.right_entity
+        active = robot.left_active_joints if arm == "left" else robot.right_active_joints
+        gripper = robot.left_gripper if arm == "left" else robot.right_gripper
+        scale = robot.left_gripper_scale if arm == "left" else robot.right_gripper_scale
+        if not gripper or scale[1] == scale[0]:
+            return 0.0
+        base_joint = gripper[0][0]
+        qpos = entity.get_qpos()
+        value = float(qpos[active.index(base_joint)])
+        return float(np.clip((value - scale[0]) / (scale[1] - scale[0]), 0.0, 1.0))
+
+    def _read_measured_state16(self, env_index: int) -> np.ndarray:
+        """Return post-physics TCP pose + aperture for both arms.
+
+        RoboTwin's public ``joint_action/vector`` contains joint drive targets,
+        which are commands rather than deployable measurements.  The event
+        sidecar reads this separate state directly from SAPIEN qpos/TCP after
+        physics instead.  It has the same 7+1+7+1 layout as the offline replay
+        collector's ``ee_state16`` cache.
+        """
+        subenv = self.venv.envs[env_index]
+        with subenv.lock:
+            robot = subenv.task.robot
+            left_pose = np.asarray(robot.get_left_tcp_pose(), dtype=np.float32)
+            right_pose = np.asarray(robot.get_right_tcp_pose(), dtype=np.float32)
+            left_opening = self._measured_gripper_opening(robot, "left")
+            right_opening = self._measured_gripper_opening(robot, "right")
+        if left_pose.shape != (7,) or right_pose.shape != (7,):
+            raise RuntimeError("RoboTwin TCP measurement must contain position and quaternion")
+        return np.concatenate(
+            (left_pose, np.asarray([left_opening], np.float32), right_pose, np.asarray([right_opening], np.float32))
+        )
+
     def _extract_obs_image(self, raw_obs):
         batch_images = []
         batch_wrist_images = []
         batch_states = []
         batch_instructions = []
-        for obs in raw_obs:
+        for env_index, obs in enumerate(raw_obs):
             batch_images.append(
                 self.center_and_crop(obs["full_image"], center_crop=self.center_crop)
             )
@@ -258,11 +299,15 @@ class RoboTwinEnv(gym.Env):
         else:
             batch_wrist_images = None
         batch_states = torch.stack([torch.from_numpy(state) for state in batch_states])
+        batch_measured_state16 = torch.stack(
+            [torch.from_numpy(self._read_measured_state16(env_index)) for env_index in range(len(raw_obs))]
+        )
 
         extracted_obs = {
             "main_images": batch_images,
             "wrist_images": batch_wrist_images,
             "states": batch_states,
+            "measured_state16": batch_measured_state16,
             "task_descriptions": batch_instructions,
         }
 

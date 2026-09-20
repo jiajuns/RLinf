@@ -76,6 +76,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   +algorithm.event_sidecar.observer_checkpoint="${ROBOTWIN_EVENT_OBSERVER_CKPT}" \
   +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
   +algorithm.event_sidecar.value_lr=1.0e-4 \
+  +algorithm.event_sidecar.proprio_time_delta=5.0 \
   +algorithm.event_branch.num_candidates=4 \
   +algorithm.event_branch.chunk_interval=10 \
   +algorithm.event_branch.horizon=10 \

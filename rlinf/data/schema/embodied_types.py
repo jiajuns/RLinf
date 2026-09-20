@@ -65,6 +65,7 @@ class EnvOutput:
     branch_mask: Optional[torch.Tensor] = None  # [B]
     branch_main_images: Optional[torch.Tensor] = None  # [B, candidates, H, W, 3]
     branch_wrist_images: Optional[torch.Tensor] = None  # [B, candidates, (W), H, W, 3]
+    branch_measured_state16: Optional[torch.Tensor] = None  # [B, candidates, 16]
 
     def __post_init__(self):
         self.obs = put_tensor_device(self.obs, "cpu")
@@ -123,6 +124,7 @@ class EnvOutput:
             "branch_mask",
             "branch_main_images",
             "branch_wrist_images",
+            "branch_measured_state16",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -280,6 +282,9 @@ class EnvOutput:
             branch_wrist_images=_merge_optional_tensor_field(
                 "branch_wrist_images", allow_partial_none=True, fill_value=0
             ),
+            branch_measured_state16=_merge_optional_tensor_field(
+                "branch_measured_state16", allow_partial_none=True, fill_value=0.0
+            ),
         ).to_dict()
 
     def to_dict(self) -> dict[str, Any]:
@@ -305,6 +310,7 @@ class EnvOutput:
             "branch_mask": self.branch_mask,
             "branch_main_images": self.branch_main_images,
             "branch_wrist_images": self.branch_wrist_images,
+            "branch_measured_state16": self.branch_measured_state16,
         }
 
 
@@ -429,6 +435,7 @@ class ChunkStepResult:
     branch_mask: torch.Tensor = None
     branch_main_images: torch.Tensor = None
     branch_wrist_images: torch.Tensor = None
+    branch_measured_state16: torch.Tensor = None
 
     def __post_init__(self):
         if self.actions is not None:
@@ -459,6 +466,7 @@ class ChunkStepResult:
             "branch_mask",
             "branch_main_images",
             "branch_wrist_images",
+            "branch_measured_state16",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -493,6 +501,7 @@ class Trajectory:
     branch_mask: torch.Tensor = None
     branch_main_images: torch.Tensor = None
     branch_wrist_images: torch.Tensor = None
+    branch_measured_state16: torch.Tensor = None
     forward_inputs: dict[str, Any] = field(default_factory=dict)
     curr_obs: dict[str, Any] = field(default_factory=dict)
     next_obs: dict[str, Any] = field(default_factory=dict)

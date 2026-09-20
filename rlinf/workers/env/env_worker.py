@@ -553,6 +553,9 @@ class EnvWorker(Worker):
                     (branch_batch_size, branch_candidates, *extracted_obs["wrist_images"].shape[1:]),
                     dtype=extracted_obs["wrist_images"].dtype,
                 ),
+                "branch_measured_state16": torch.zeros(
+                    (branch_batch_size, branch_candidates, 16), dtype=torch.float32
+                ),
             }
         chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
         final_obs = (
@@ -1249,6 +1252,7 @@ class EnvWorker(Worker):
                         branch_mask=env_output.branch_mask,
                         branch_main_images=env_output.branch_main_images,
                         branch_wrist_images=env_output.branch_wrist_images,
+                        branch_measured_state16=env_output.branch_measured_state16,
                     )
 
                     self.trajectory_builders[stage_id].append_step_result(
@@ -1409,6 +1413,7 @@ class EnvWorker(Worker):
                     branch_mask=env_output.branch_mask,
                     branch_main_images=env_output.branch_main_images,
                     branch_wrist_images=env_output.branch_wrist_images,
+                    branch_measured_state16=env_output.branch_measured_state16,
                 )
                 self.trajectory_builders[stage_id].append_step_result(chunk_step_result)
                 if (

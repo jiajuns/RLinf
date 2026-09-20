@@ -69,6 +69,7 @@ class EmbodiedTrajectoryBuilder:
     branch_mask: list[torch.Tensor] = field(default_factory=list)
     branch_main_images: list[torch.Tensor] = field(default_factory=list)
     branch_wrist_images: list[torch.Tensor] = field(default_factory=list)
+    branch_measured_state16: list[torch.Tensor] = field(default_factory=list)
     forward_inputs: list[dict[str, Any]] = field(
         default_factory=list
     )  # trajectory_length
@@ -112,6 +113,7 @@ class EmbodiedTrajectoryBuilder:
             ("branch_mask", self.branch_mask),
             ("branch_main_images", self.branch_main_images),
             ("branch_wrist_images", self.branch_wrist_images),
+            ("branch_measured_state16", self.branch_measured_state16),
         ):
             value = getattr(result, field_name)
             if result.rewards is not None and value is not None:
@@ -203,6 +205,7 @@ class EmbodiedTrajectoryBuilder:
         self.branch_mask.clear()
         self.branch_main_images.clear()
         self.branch_wrist_images.clear()
+        self.branch_measured_state16.clear()
         self.forward_inputs.clear()
         self.curr_obs.clear()
         self.next_obs.clear()
@@ -251,6 +254,7 @@ class EmbodiedTrajectoryBuilder:
             ("branch_mask", self.branch_mask),
             ("branch_main_images", self.branch_main_images),
             ("branch_wrist_images", self.branch_wrist_images),
+            ("branch_measured_state16", self.branch_measured_state16),
         ):
             if values:
                 setattr(trajectory, field_name, torch.stack(values, dim=0).cpu().contiguous())

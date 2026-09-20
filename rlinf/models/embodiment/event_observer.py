@@ -131,6 +131,8 @@ class RGBRoleFeatureStudent(nn.Module):
     PPO states without HDF/Zarr lookup.
     """
 
+    proprio_feature_dim = 12
+
     def __init__(self, feature_dim: int, *, hidden_dim: int = 128, image_size: tuple[int, int] = (96, 128)) -> None:
         super().__init__()
         if feature_dim < 1 or hidden_dim < 1 or min(image_size) < 16:
@@ -144,9 +146,33 @@ class RGBRoleFeatureStudent(nn.Module):
             nn.AdaptiveAvgPool2d(1), nn.Flatten(),
         )
         self.head = nn.Sequential(
-            nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim), nn.GELU(),
+            nn.LayerNorm(hidden_dim + self.proprio_feature_dim),
+            nn.Linear(hidden_dim + self.proprio_feature_dim, hidden_dim), nn.GELU(),
             nn.Linear(hidden_dim, feature_dim),
         )
+
+    @staticmethod
+    def measured_proprio_features(
+        measured_state16: torch.Tensor, *, time_delta: float = 0.1
+    ) -> torch.Tensor:
+        """Derive causal deployable gripper/EE motion features from readback.
+
+        Layout is left TCP pose (7), left aperture, right TCP pose (7), right
+        aperture.  The output exactly occupies the nonvisual tail of the
+        offline teacher interface: normalized aperture, causal aperture delta,
+        two TCP linear deltas and their speeds.  It deliberately does not read
+        any action command, depth, oracle mask, or object state.
+        """
+        if measured_state16.ndim != 3 or measured_state16.shape[-1] != 16 or time_delta <= 0:
+            raise ValueError("measured_state16 must be [batch,time,16]")
+        opening = measured_state16[..., (7, 15)].clamp(0.0, 1.0)
+        position = torch.stack((measured_state16[..., :3], measured_state16[..., 8:11]), dim=2)
+        opening_delta = torch.zeros_like(opening)
+        position_delta = torch.zeros_like(position)
+        opening_delta[:, 1:] = (opening[:, 1:] - opening[:, :-1]) / time_delta
+        position_delta[:, 1:] = (position[:, 1:] - position[:, :-1]) / time_delta
+        speed = torch.linalg.vector_norm(position_delta, dim=-1)
+        return torch.cat((opening, opening_delta, position_delta.flatten(2), speed), dim=-1)
 
     def _prepare_images(self, images: torch.Tensor, name: str) -> torch.Tensor:
         if images.ndim != 5 or images.shape[-1] != 3:
@@ -157,15 +183,32 @@ class RGBRoleFeatureStudent(nn.Module):
             value = value / 255.0
         return F.interpolate(value, size=self.image_size, mode="bilinear", align_corners=False)
 
-    def forward(self, head_images: torch.Tensor, wrist_images: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        head_images: torch.Tensor,
+        wrist_images: torch.Tensor,
+        measured_state16: torch.Tensor | None = None,
+        proprio_time_delta: float = 0.1,
+    ) -> torch.Tensor:
         if head_images.shape[:2] != wrist_images.shape[:2]:
             raise ValueError("head and wrist image batch/time prefixes must match")
         batch, steps = head_images.shape[:2]
+        if measured_state16 is None:
+            proprio = torch.zeros(
+                (batch, steps, self.proprio_feature_dim), device=head_images.device, dtype=torch.float32
+            )
+        else:
+            if measured_state16.shape[:2] != (batch, steps):
+                raise ValueError("measured_state16 must share image batch/time prefixes")
+            proprio = self.measured_proprio_features(
+                measured_state16.to(torch.float32), time_delta=proprio_time_delta
+            )
         encoded = self.encoder(torch.cat((
             self._prepare_images(head_images, "head_images"),
             self._prepare_images(wrist_images, "wrist_images"),
         ), dim=1))
-        return self.head(encoded).reshape(batch, steps, self.feature_dim)
+        encoded = encoded.reshape(batch, steps, -1)
+        return self.head(torch.cat((encoded, proprio), dim=-1))
 
 
 def event_observer_supervision_loss(

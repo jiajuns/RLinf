@@ -37,6 +37,15 @@ def test_event_sidecar_can_use_a_frozen_rgb_student_online():
     assert output.values.shape == (1, 2)
 
 
+def test_rgb_student_consumes_measured_proprioception_causally():
+    student = RGBRoleFeatureStudent(30, hidden_dim=8, image_size=(32, 32))
+    state = torch.zeros(1, 3, 16)
+    state[0, :, 7] = torch.tensor([0.0, 0.5, 1.0])
+    features = student.measured_proprio_features(state, time_delta=0.1)
+    assert features.shape == (1, 3, 12)
+    torch.testing.assert_close(features[0, 1, 2], torch.tensor(5.0))
+
+
 def test_event_sidecar_rollout_expands_chunk_boundary_rgb_without_cache_lookup():
     observer = EventObserver(30, 3, 4, hidden_dim=8, num_geometric_primitives=2, num_state_change_primitives=1)
     sidecar = OnlineEventValueSidecar(

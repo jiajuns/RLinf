@@ -239,6 +239,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     sidecar_curr_obs,
                     self.rollout_batch["branch_main_images"].to(device),
                     self.rollout_batch["branch_wrist_images"].to(device),
+                    self.rollout_batch.get("branch_measured_state16", None).to(device)
+                    if self.rollout_batch.get("branch_measured_state16", None) is not None
+                    else None,
                 )
                 branch_rewards = self.rollout_batch["branch_rewards"].to(device)
                 branch_horizons = self.rollout_batch["branch_horizons"].to(device)

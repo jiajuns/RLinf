@@ -32,37 +32,39 @@ class CachedRGBEpisodes(Dataset):
     def __len__(self) -> int:
         return len(self.paths)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         with np.load(self.paths[index], allow_pickle=False) as data:
             source = Path(str(data["source_episode"]))
             target = torch.from_numpy(np.asarray(data["features"], np.float32))
         with h5py.File(source, "r") as handle:
             head = torch.from_numpy(np.asarray(handle["rgb"]["head_camera"], np.uint8))
             wrist = torch.from_numpy(np.asarray(handle["rgb"]["right_camera"], np.uint8))
-        if len(head) != len(wrist) or len(head) != len(target):
+            measured_state16 = torch.from_numpy(np.asarray(handle["ee_state16"], np.float32))
+        if len(head) != len(wrist) or len(head) != len(target) or len(measured_state16) != len(target):
             raise ValueError(f"unaligned RGB/teacher cache: {self.paths[index]}")
-        return head, wrist, target
+        return head, wrist, measured_state16, target
 
 
-def collate(rows: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    maximum = max(len(target) for _, _, target in rows)
-    head, wrist, target, mask = [], [], [], []
-    for current_head, current_wrist, current_target in rows:
+def collate(rows: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    maximum = max(len(target) for _, _, _, target in rows)
+    head, wrist, measured_state16, target, mask = [], [], [], [], []
+    for current_head, current_wrist, current_state, current_target in rows:
         current_steps = len(current_target)
         padded_head = torch.zeros((maximum, *current_head.shape[1:]), dtype=current_head.dtype)
         padded_wrist = torch.zeros((maximum, *current_wrist.shape[1:]), dtype=current_wrist.dtype)
         padded_target = torch.zeros((maximum, current_target.shape[-1]), dtype=current_target.dtype)
-        padded_head[:current_steps], padded_wrist[:current_steps], padded_target[:current_steps] = current_head, current_wrist, current_target
-        head.append(padded_head); wrist.append(padded_wrist); target.append(padded_target)
+        padded_state = torch.zeros((maximum, 16), dtype=current_state.dtype)
+        padded_head[:current_steps], padded_wrist[:current_steps], padded_target[:current_steps], padded_state[:current_steps] = current_head, current_wrist, current_target, current_state
+        head.append(padded_head); wrist.append(padded_wrist); measured_state16.append(padded_state); target.append(padded_target)
         mask.append(torch.arange(maximum) < current_steps)
-    return torch.stack(head), torch.stack(wrist), torch.stack(target), torch.stack(mask)
+    return torch.stack(head), torch.stack(wrist), torch.stack(measured_state16), torch.stack(target), torch.stack(mask)
 
 
 def evaluate(model: RGBRoleFeatureStudent, loader: DataLoader, device: torch.device) -> float:
     model.eval(); total = count = 0.0
     with torch.no_grad():
-        for head, wrist, target, mask in loader:
-            predicted = model(head.to(device), wrist.to(device))
+        for head, wrist, measured_state16, target, mask in loader:
+            predicted = model(head.to(device), wrist.to(device), measured_state16.to(device))
             error = (predicted - target.to(device)).abs()[mask.to(device)].mean()
             total += float(error); count += 1
     return total / max(count, 1)
@@ -93,8 +95,8 @@ def main() -> None:
     best = float("inf")
     for epoch in range(args.epochs):
         model.train(); total = 0.0
-        for head, wrist, target, mask in train_loader:
-            prediction = model(head.to(device), wrist.to(device))
+        for head, wrist, measured_state16, target, mask in train_loader:
+            prediction = model(head.to(device), wrist.to(device), measured_state16.to(device))
             loss = F.smooth_l1_loss(prediction[mask.to(device)], target.to(device)[mask.to(device)])
             optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
             total += float(loss)

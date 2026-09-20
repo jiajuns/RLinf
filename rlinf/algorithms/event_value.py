@@ -56,12 +56,20 @@ class OnlineEventValueSidecar(nn.Module):
     """Frozen observer plus an online-updated SMDP Event Value Critic."""
 
     def __init__(
-        self, observer: EventObserver, event_value: EventValueCritic, rgb_student: RGBRoleFeatureStudent | None = None
+        self,
+        observer: EventObserver,
+        event_value: EventValueCritic,
+        rgb_student: RGBRoleFeatureStudent | None = None,
+        *,
+        proprio_time_delta: float = 0.1,
     ) -> None:
         super().__init__()
         self.observer = observer
         self.event_value = event_value
         self.rgb_student = rgb_student
+        if proprio_time_delta <= 0:
+            raise ValueError("proprio_time_delta must be positive")
+        self.proprio_time_delta = proprio_time_delta
         self.freeze_observer()
 
     @classmethod
@@ -109,12 +117,25 @@ class OnlineEventValueSidecar(nn.Module):
 
     @torch.no_grad()
     def infer_images(
-        self, head_images: torch.Tensor, wrist_images: torch.Tensor, *, boundary_threshold: float = 0.5
+        self,
+        head_images: torch.Tensor,
+        wrist_images: torch.Tensor,
+        measured_state16: torch.Tensor | None = None,
+        *,
+        boundary_threshold: float = 0.5,
     ) -> EventSidecarOutput:
         """Run the online RGB student then the frozen Event Observer."""
         if self.rgb_student is None:
             raise RuntimeError("infer_images requires an RGB student checkpoint")
-        return self.infer(self.rgb_student(head_images, wrist_images), boundary_threshold=boundary_threshold)
+        return self.infer(
+            self.rgb_student(
+                head_images,
+                wrist_images,
+                measured_state16,
+                proprio_time_delta=self.proprio_time_delta,
+            ),
+            boundary_threshold=boundary_threshold,
+        )
 
     @torch.no_grad()
     def infer(
@@ -225,7 +246,14 @@ def infer_event_sidecar_rollout(
     # successor is the next current frame and would otherwise be duplicated.
     head = torch.cat((current_head, next_head[-1:]), dim=0).transpose(0, 1).contiguous()
     wrist = torch.cat((current_wrist, next_wrist[-1:]), dim=0).transpose(0, 1).contiguous()
-    output = sidecar.infer_images(head, wrist, boundary_threshold=boundary_threshold)
+    measured = None
+    if "measured_state16" in curr_obs and "measured_state16" in next_obs:
+        current_measured = curr_obs["measured_state16"]
+        next_measured = next_obs["measured_state16"]
+        if current_measured.shape[:2] != current_head.shape[:2] or next_measured.shape != current_measured.shape:
+            raise ValueError("measured_state16 is not aligned to current/next observations")
+        measured = torch.cat((current_measured, next_measured[-1:]), dim=0).transpose(0, 1).contiguous()
+    output = sidecar.infer_images(head, wrist, measured, boundary_threshold=boundary_threshold)
     chunks, batch = current_head.shape[:2]
     if output.values.shape != (batch, chunks + 1):
         raise RuntimeError("Event sidecar output is not aligned to chunk observations")
@@ -262,6 +290,7 @@ def infer_branch_future_event_values(
     curr_obs: Mapping[str, torch.Tensor],
     branch_main_images: torch.Tensor,
     branch_wrist_images: torch.Tensor,
+    branch_measured_state16: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Evaluate ``V_E(z_{t+H})`` for sparse matched-state branch endpoints.
 
@@ -305,6 +334,17 @@ def infer_branch_future_event_values(
         endpoint_wrist = branch_wrist[chunk_idx].unsqueeze(2)
         sequence_head = torch.cat((repeated_head, endpoint_head), dim=2).flatten(0, 1)
         sequence_wrist = torch.cat((repeated_wrist, endpoint_wrist), dim=2).flatten(0, 1)
-        endpoint_values = sidecar.infer_images(sequence_head, sequence_wrist).values[:, -1]
+        sequence_measured = None
+        if branch_measured_state16 is not None:
+            if "measured_state16" not in curr_obs:
+                raise ValueError("branch measured state needs current measured_state16")
+            current_measured = curr_obs["measured_state16"]
+            if branch_measured_state16.shape[:3] != (chunks, batch, candidates):
+                raise ValueError("branch measured state is not aligned to branch images")
+            prefix_measured = current_measured[: chunk_idx + 1].permute(1, 0, 2)
+            repeated_measured = prefix_measured[:, None].expand(-1, candidates, -1, -1)
+            endpoint_measured = branch_measured_state16[chunk_idx].unsqueeze(2)
+            sequence_measured = torch.cat((repeated_measured, endpoint_measured), dim=2).flatten(0, 1)
+        endpoint_values = sidecar.infer_images(sequence_head, sequence_wrist, sequence_measured).values[:, -1]
         values.append(endpoint_values.reshape(batch, candidates))
     return torch.stack(values, dim=0)
