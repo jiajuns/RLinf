@@ -18,6 +18,10 @@ set -euo pipefail
 export RLINF_LOCAL_RAY=1
 unset RAY_ADDRESS
 export RLINF_RAY_TMPDIR="/tmp/rlinf_ray_${SLURM_JOB_ID:?}"
+# The upstream RoboTwin recipe is authored for ranks 0-7.  This formal
+# reproduction job requests one GPU, so all collocated components must occupy
+# rank 0 rather than failing configuration validation before training starts.
+export RLINF_COMPONENT_PLACEMENT="${RLINF_COMPONENT_PLACEMENT:-0}"
 
 export REPO_PATH="${REPO_PATH:-/data/user/leviccdong/EKSF/code/RLinf-piRL}"
 export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
@@ -60,7 +64,6 @@ exec python examples/embodiment/train_embodied_agent.py \
   runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" \
   runner.val_check_interval=25 \
   runner.save_interval=25 \
-  'cluster.component_placement."actor, env, rollout"=0' \
   env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" \
   env.eval.total_num_envs="${ROBOTWIN_EVAL_ENVS}" \
   env.train.rollout_epoch="${ROBOTWIN_ROLLOUT_EPOCHS}" \
