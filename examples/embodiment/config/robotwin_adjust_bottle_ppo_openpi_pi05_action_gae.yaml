@@ -31,5 +31,6 @@ actor:
     openpi:
       noise_method: flow_sde
       joint_logprob: false
-      value_after_vlm: true
-
+      # Match the official adjust_bottle SFT value-head geometry (1024-D).
+      # The alternate after-VLM critic is 2048-D and cannot load this SFT.
+      value_after_vlm: false
