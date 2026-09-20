@@ -35,6 +35,7 @@ OUTPUT=${COLLECTION_ROOT:-$ROOT/data/robotwin_adjust_bottle_event_rgb_v1}
 SEED_BASE=${COLLECTION_SEED_BASE:-10000}
 SAMPLE_HZ=${SAMPLE_HZ:-10}
 EPISODES_PER_TASK=${EPISODES_PER_TASK:-1}
+MIN_VALID_FRACTION=${MIN_VALID_FRACTION:-0.6}
 TASK_ID=${SLURM_ARRAY_TASK_ID:?submit this as a Slurm array}
 test "$EPISODES_PER_TASK" -gt 0
 SEED=$((SEED_BASE + TASK_ID * EPISODES_PER_TASK))
@@ -60,15 +61,23 @@ python -u "$COLLECTOR" \
   --scene-backend renderer --output "$OUTPUT"
 
 EPISODE_DIR="$OUTPUT/adjust_bottle/aloha-agilex/clean"
-python - "$EPISODE_DIR" "$SEED" "$EPISODES_PER_TASK" <<'PY'
+RECEIPT="$EPISODE_DIR/receipt_seed_${SEED}_${EPISODES_PER_TASK}.json"
+python - "$EPISODE_DIR" "$RECEIPT" "$EPISODES_PER_TASK" "$MIN_VALID_FRACTION" <<'PY'
 import sys
+import json
+import math
 from pathlib import Path
 import h5py
 
-directory, start, count = Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
-successes = 0
-for seed in range(start, start + count):
-    path = directory / f"episode_seed_{seed}.hdf5"
+directory, receipt, count, minimum_fraction = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
+if not receipt.is_file() or not 0 < minimum_fraction <= 1:
+    raise SystemExit(f"invalid collection receipt or minimum fraction: {receipt}")
+rows = json.loads(receipt.read_text())["episodes"]
+usable, successes = 0, 0
+for row in rows:
+    if row["status"] not in {"written", "existing"}:
+        continue
+    path = Path(row["path"])
     if not path.is_file():
         raise SystemExit(f"collector did not produce {path}")
     with h5py.File(path, "r") as handle:
@@ -77,7 +86,11 @@ for seed in range(start, start + count):
         cameras = set(handle.get("rgb", {}))
         if missing or not {"head_camera", "right_camera"}.issubset(cameras):
             raise SystemExit(f"invalid sidecar: missing={sorted(missing)}, cameras={sorted(cameras)}")
+        usable += 1
         successes += bool(handle.attrs.get("native_success", False))
-print({"episodes": count, "native_successes": successes,
-       "seed_range_inclusive": [start, start + count - 1]})
+minimum = math.ceil(count * minimum_fraction)
+print({"requested": count, "usable": usable, "native_successes": successes,
+       "collector_errors": count - usable, "minimum_usable": minimum})
+if usable < minimum:
+    raise SystemExit(f"only {usable}/{count} usable trajectories; need at least {minimum}")
 PY
