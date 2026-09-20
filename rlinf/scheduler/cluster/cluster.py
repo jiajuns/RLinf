@@ -107,6 +107,16 @@ class ClusterEnvVar(str, Enum):
     Set explicitly when workers do not share a filesystem with the launch node.
     """
 
+    LOCAL_RAY = "LOCAL_RAY"
+    """Start a fresh, job-local Ray head instead of attaching to ``address=auto``.
+
+    This is required when several independent one-node Slurm jobs share a
+    host: Ray's default auto-discovery would otherwise attach every job to the
+    first job's Ray head, collapsing their separately allocated GPUs into one
+    scheduler view.  Set ``RLINF_LOCAL_RAY=1`` and, optionally,
+    ``RLINF_RAY_TMPDIR=/tmp/unique-per-job``.
+    """
+
 
 class PathEnvMergeMode(str, Enum):
     """Merge mode for path-like worker env vars."""
@@ -134,6 +144,7 @@ class Cluster:
         ClusterEnvVar.NET_EMULATION: "0",
         ClusterEnvVar.PATH_ENV_MERGE_MODE: PathEnvMergeMode.APPEND.value,
         ClusterEnvVar.CODE_WORKING_DIR: "0",
+        ClusterEnvVar.LOCAL_RAY: "0",
     }
     PATH_LIKE_ENV_VARS = {
         "PYTHONPATH",
@@ -330,32 +341,38 @@ class Cluster:
             Cluster._prepare_ray_code_sync_runtime_env_fragment()
         )
 
-        try:
-            # First try to connect to an existing Ray cluster
-            ray_init_kwargs: dict[str, Any] = {
-                "address": "auto",
-                "logging_level": Cluster.LOGGING_LEVEL,
-                "namespace": Cluster.NAMESPACE,
-            }
-            if self._ray_code_sync_fragment is not None:
-                ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
-                py_mods = ray_init_kwargs["runtime_env"].get("py_modules") or ()
-                self._logger.info(
-                    "%s Ray code sync is enabled (py_modules=%r); workers receive "
-                    "only the rlinf package from the launch node. Disable with %s=0.",
-                    Cluster.SYS_NAME,
-                    tuple(py_mods),
-                    Cluster.get_full_env_var_name(ClusterEnvVar.CODE_WORKING_DIR),
-                )
+        local_ray = Cluster.get_sys_env_var(
+            ClusterEnvVar.LOCAL_RAY,
+            Cluster.DEFAULT_SYS_ENV_VAR[ClusterEnvVar.LOCAL_RAY],
+        ).lower() in {"1", "true", "yes", "on"}
+        ray_init_kwargs: dict[str, Any] = {
+            "logging_level": Cluster.LOGGING_LEVEL,
+            "namespace": Cluster.NAMESPACE,
+        }
+        if self._ray_code_sync_fragment is not None:
+            ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
+            py_mods = ray_init_kwargs["runtime_env"].get("py_modules") or ()
+            self._logger.info(
+                "%s Ray code sync is enabled (py_modules=%r); workers receive "
+                "only the rlinf package from the launch node. Disable with %s=0.",
+                Cluster.SYS_NAME,
+                tuple(py_mods),
+                Cluster.get_full_env_var_name(ClusterEnvVar.CODE_WORKING_DIR),
+            )
+
+        if local_ray:
+            ray_tmpdir = os.environ.get("RLINF_RAY_TMPDIR")
+            if ray_tmpdir:
+                os.makedirs(ray_tmpdir, exist_ok=True)
+                ray_init_kwargs["_temp_dir"] = ray_tmpdir
+            self._logger.info("Starting an isolated local Ray head for this job.")
             ray.init(**ray_init_kwargs)
-        except ConnectionError:
-            ray_init_kwargs = {
-                "logging_level": Cluster.LOGGING_LEVEL,
-                "namespace": Cluster.NAMESPACE,
-            }
-            if self._ray_code_sync_fragment is not None:
-                ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
-            ray.init(**ray_init_kwargs)
+        else:
+            try:
+                # First try to connect to an existing Ray cluster.
+                ray.init(address="auto", **ray_init_kwargs)
+            except ConnectionError:
+                ray.init(**ray_init_kwargs)
 
         # Ray log collector
         if distributed_log_dir is not None:

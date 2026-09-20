@@ -16,6 +16,13 @@
 # allocation has repeatedly stalled during GPU scene construction elsewhere.
 set -euo pipefail
 
+# Each Slurm allocation must own its Ray runtime.  Without this, Ray's
+# address=auto discovery attaches simultaneous seeds to the first seed's
+# local head and schedules all π0.5 actors on one GPU.
+unset RAY_ADDRESS
+export RLINF_LOCAL_RAY=1
+export RLINF_RAY_TMPDIR="/tmp/rlinf_ray_${SLURM_JOB_ID:?}"
+
 export PIRL_MAX_EPOCHS="${PIRL_MAX_EPOCHS:-100}"
 export PIRL_MAX_STEPS="${PIRL_MAX_STEPS:-100}"
 export PIRL_SAVE_INTERVAL="${PIRL_SAVE_INTERVAL:-25}"
