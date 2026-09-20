@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 
 from rlinf.envs.sim.robotwin.seed_utils import partition_success_seeds
+from rlinf.envs.sim.robotwin.robotwin_snapshot import restore_robotwin_env, snapshot_robotwin_env
 from rlinf.envs.utils import center_crop_image, list_of_dict_to_dict_of_list
 
 __all__ = ["RoboTwinEnv"]
@@ -100,6 +101,18 @@ class RoboTwinEnv(gym.Env):
             n_envs=self.num_envs,
             env_seeds=env_seeds,
         )
+
+    def get_state(self) -> bytes:
+        """Capture an exact live SAPIEN state for controlled action branches."""
+        return snapshot_robotwin_env(self)
+
+    def load_state(self, state: bytes) -> None:
+        """Restore a state returned by :meth:`get_state`, never reset."""
+        restore_robotwin_env(self, state)
+
+    def set_state(self, state: bytes) -> None:
+        """Legacy generic-snapshot alias; branches should prefer load_state."""
+        self.load_state(state)
 
     @property
     def device(self):
