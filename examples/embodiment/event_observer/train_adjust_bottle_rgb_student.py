@@ -85,7 +85,7 @@ def main() -> None:
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     train = CachedRGBEpisodes(args.cache, validation=False, fraction=args.validation_fraction)
     validation = CachedRGBEpisodes(args.cache, validation=True, fraction=args.validation_fraction)
-    feature_dim = train[0][2].shape[-1]
+    feature_dim = train[0][3].shape[-1]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = RGBRoleFeatureStudent(feature_dim).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
