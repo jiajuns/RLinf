@@ -7,6 +7,7 @@
 # cache-array job.  This keeps the quality boundary explicit and reproducible.
 #SBATCH --job-name=rw_adjust_sam_audit
 #SBATCH --partition=acd_u
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=01:00:00
