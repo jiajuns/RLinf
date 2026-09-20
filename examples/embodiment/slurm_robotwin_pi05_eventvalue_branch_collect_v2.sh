@@ -39,11 +39,14 @@ export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bot
 cd "${ROBOTWIN_PATH}"
 source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 
+# RLinf requires save_interval to be divisible by val_check_interval.  The
+# short collector has no validation before epoch 100, but keeps a valid
+# checkpoint cadence for the formal 500+ state collection.
 exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   --config-path config --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
   runner.max_epochs="${ROBOTWIN_BRANCH_COLLECT_EPOCHS}" \
   runner.logger.log_path="${ROBOTWIN_LOG_PATH}" runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" \
-  runner.val_check_interval=100000 runner.save_interval=100 \
+  runner.val_check_interval=100 runner.save_interval=100 \
   env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" env.train.rollout_epoch=1 env.eval.total_num_envs=1 env.eval.rollout_epoch=1 \
   env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
