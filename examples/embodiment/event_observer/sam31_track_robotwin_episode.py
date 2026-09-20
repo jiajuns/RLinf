@@ -16,7 +16,6 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import h5py
 import numpy as np
 import torch
 from PIL import Image
@@ -30,7 +29,7 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_frames(handle: h5py.File, camera: str, directory: Path) -> tuple[int, int, int]:
+def _write_frames(handle: object, camera: str, directory: Path) -> tuple[int, int, int]:
     if "rgb" not in handle or camera not in handle["rgb"]:
         raise ValueError(f"episode has no RGB stream {camera!r}")
     frames = handle["rgb"][camera]
@@ -40,6 +39,15 @@ def _write_frames(handle: h5py.File, camera: str, directory: Path) -> tuple[int,
     for index, frame in enumerate(frames):
         Image.fromarray(np.asarray(frame, np.uint8), mode="RGB").save(directory / f"{index:05d}.jpg")
     return int(len(frames)), int(frames.shape[2]), int(frames.shape[1])
+
+
+def _read_frame_directory(directory: Path) -> tuple[int, int, int]:
+    frames = sorted(directory.glob("*.jpg"))
+    if len(frames) < 2:
+        raise ValueError(f"frame directory {directory} has fewer than two JPEG frames")
+    with Image.open(frames[0]) as image:
+        width, height = image.size
+    return len(frames), width, height
 
 
 def _best_box(probabilities: object, boxes: object, width: int, height: int) -> np.ndarray:
@@ -96,7 +104,12 @@ def _track_camera(predictor: object, frames: Path, length: int, width: int, heig
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--episode", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--episode", type=Path)
+    source.add_argument("--frames-root", type=Path,
+                        help="camera subdirectories pre-exported by the RoboTwin Python environment")
+    parser.add_argument("--episode-sha256", default="",
+                        help="required with --frames-root to bind tracks to their HDF sidecar")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", default="bottle")
@@ -104,8 +117,10 @@ def main() -> None:
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("SAM teacher tracking requires an allocated CUDA GPU")
-    if not args.checkpoint.is_file() or not args.episode.is_file():
+    if not args.checkpoint.is_file() or (args.episode and not args.episode.is_file()):
         raise FileNotFoundError("episode or SAM checkpoint is missing")
+    if args.frames_root and (not args.frames_root.is_dir() or not args.episode_sha256):
+        raise ValueError("--frames-root needs an existing directory and --episode-sha256")
     from sam3.model_builder import build_sam3_multiplex_video_predictor
 
     cameras = tuple(name.strip() for name in args.cameras.split(",") if name.strip())
@@ -118,19 +133,33 @@ def main() -> None:
     workspace = Path(tempfile.mkdtemp(prefix="sam31_robotwin_"))
     try:
         tracks, lengths = [], []
-        with h5py.File(args.episode, "r") as handle:
+        if args.episode:
+            # h5py is intentionally imported only in the RoboTwin Python
+            # environment.  The production Slurm launcher pre-exports JPEGs
+            # because SAM's Python 3.12 environment does not ship h5py.
+            import h5py
+            handle_context = h5py.File(args.episode, "r")
+        else:
+            handle_context = None
+        try:
             for camera in cameras:
-                frame_dir = workspace / camera
-                length, width, height = _write_frames(handle, camera, frame_dir)
+                frame_dir = workspace / camera if args.episode else args.frames_root / camera
+                if handle_context is not None:
+                    length, width, height = _write_frames(handle_context, camera, frame_dir)
+                else:
+                    length, width, height = _read_frame_directory(frame_dir)
                 tracks.append(_track_camera(predictor, frame_dir, length, width, height, args.prompt))
                 lengths.append(length)
+        finally:
+            if handle_context is not None:
+                handle_context.close()
         if len(set(lengths)) != 1:
             raise ValueError(f"camera streams have incompatible lengths: {lengths}")
         args.output.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             args.output,
             format=np.asarray("event_sam31_track_v1"),
-            episode_sha256=np.asarray(_hash_file(args.episode)),
+            episode_sha256=np.asarray(_hash_file(args.episode) if args.episode else args.episode_sha256),
             checkpoint_sha256=np.asarray(_hash_file(args.checkpoint)),
             prompt=np.asarray(args.prompt),
             cameras=np.asarray(cameras),

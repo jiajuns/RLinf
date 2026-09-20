@@ -27,10 +27,34 @@ EPISODE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$EPISODE_LIST")
 test -n "$EPISODE" && test -f "$EPISODE"
 mkdir -p "$TRACK_ROOT" "$ROOT/outputs"
 OUTPUT="$TRACK_ROOT/$(basename "${EPISODE%.hdf5}").npz"
+FRAMES=$(mktemp -d "${TMPDIR:-/tmp}/sam31_adjust_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}_XXXX")
+trap 'rm -rf "$FRAMES"' EXIT
+
+# HDF5 is available in the RoboTwin Python environment, but intentionally not
+# in SAM's Python 3.12 environment.  Decode RGB once, then pass JPEG-only
+# camera streams to SAM so the perception teacher stays isolated.
+source /share/anaconda3/bin/activate
+conda activate "$ROOT/env_etsf"
+python - "$EPISODE" "$FRAMES" <<'PY'
+import sys
+from pathlib import Path
+import h5py
+from PIL import Image
+
+episode, root = map(Path, sys.argv[1:])
+with h5py.File(episode, "r") as handle:
+    for camera in ("right_camera", "head_camera"):
+        out = root / camera
+        out.mkdir(parents=True, exist_ok=True)
+        for index, frame in enumerate(handle["rgb"][camera]):
+            Image.fromarray(frame).save(out / f"{index:05d}.jpg", quality=95)
+PY
+EPISODE_SHA=$(sha256sum "$EPISODE" | awk '{print $1}')
+conda deactivate
 
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="$SAM_SOURCE:$SAM_SITE:$REPO/examples/embodiment/event_observer"
 export PYTHONUNBUFFERED=1
 "$SAM_PYTHON" "$REPO/examples/embodiment/event_observer/sam31_track_robotwin_episode.py" \
-  --episode "$EPISODE" --checkpoint "$CHECKPOINT" --output "$OUTPUT" \
+  --frames-root "$FRAMES" --episode-sha256 "$EPISODE_SHA" --checkpoint "$CHECKPOINT" --output "$OUTPUT" \
   --prompt bottle --cameras right_camera,head_camera
