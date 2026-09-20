@@ -19,6 +19,7 @@ export PYTHONPATH="$REPO:$SOURCE:${PYTHONPATH:-}"
 export EMBODIED_PATH="$REPO/examples/embodiment"
 export REPO_PATH="$REPO"
 export ASSETS_PATH="$ASSETS"
+export ROBOTWIN_CAMERA_SHADER=default
 cd "$SOURCE"
 python -u "$REPO/examples/embodiment/event_observer/validate_robotwin_snapshot.py" \
   --repo "$REPO" --robotwin-assets "$ASSETS" --robotwin-source "$SOURCE" --shader rt --disable-denoiser

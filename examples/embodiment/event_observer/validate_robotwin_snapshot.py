@@ -33,27 +33,12 @@ def main() -> None:
     os.environ.setdefault("EMBODIED_PATH", str(args.repo / "examples/embodiment"))
     os.environ.setdefault("REPO_PATH", str(args.repo))
     os.environ["ASSETS_PATH"] = str(args.robotwin_assets)
-    # RoboTwin hard-codes ray tracing plus OIDN in BaseTask.setup_scene.  That
-    # path changes RGB on restore even when PhysX is byte-identical.  Branch
-    # interventions need a deterministic observation function, so intercept
-    # the setup-time renderer selection before any task instance is created.
-    import sapien
-    if args.shader != "rt":
-        set_shader_original = sapien.render.set_camera_shader_dir
-
-        def choose_deterministic_shader(_requested: str) -> None:
-            set_shader_original(args.shader)
-
-        sapien.render.set_camera_shader_dir = choose_deterministic_shader
-        sapien.render.set_ray_tracing_samples_per_pixel = lambda *_args, **_kwargs: None
-        sapien.render.set_ray_tracing_path_depth = lambda *_args, **_kwargs: None
-        sapien.render.set_ray_tracing_denoiser = lambda *_args, **_kwargs: None
-    elif args.disable_denoiser:
-        # Retain the upstream RT shader (whose initialization is known to work
-        # in RoboTwin), but do not install OIDN.  OIDN's post-processing is
-        # the suspected source of non-repeatable RGB after an exact PhysX
-        # restore; this leaves deterministic ray samples as the next check.
-        sapien.render.set_ray_tracing_denoiser = lambda *_args, **_kwargs: None
+    # The deployed RoboTwin runtime reads these in Base_Task.setup_scene.
+    # This process-level route also reaches VectorEnv sub-environments, unlike
+    # a parent-only monkeypatch of SAPIEN's Python bindings.
+    os.environ["ROBOTWIN_CAMERA_SHADER"] = args.shader
+    if args.disable_denoiser:
+        os.environ["ROBOTWIN_RAY_DENOISER"] = ""
     with initialize_config_dir(version_base="1.1", config_dir=str(args.repo / "examples/embodiment/config")):
         cfg = compose(
             config_name="robotwin_adjust_bottle_ppo_openpi_pi05",
