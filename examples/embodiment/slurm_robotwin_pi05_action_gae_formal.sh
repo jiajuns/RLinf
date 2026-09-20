@@ -25,8 +25,11 @@ export RLINF_COMPONENT_PLACEMENT="${RLINF_COMPONENT_PLACEMENT:-0}"
 
 export REPO_PATH="${REPO_PATH:-/data/user/leviccdong/EKSF/code/RLinf-piRL}"
 export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
-export ROBOTWIN_PATH="${ROBOTWIN_PATH:-/data/user/leviccdong/EKSF/runtime/etsf_stage0/RoboTwin_v14_dual_gpu_20260831}"
-export ROBOTWIN_ASSETS_PATH="${ROBOTWIN_ASSETS_PATH:-${ROBOTWIN_PATH}}"
+# RLinf's official vector environment lives on RoboTwin's ``RLinf_support``
+# branch.  Keep assets in the already-provisioned simulator archive so the
+# lightweight source checkout does not duplicate large meshes/textures.
+export ROBOTWIN_PATH="${ROBOTWIN_PATH:-/data/user/leviccdong/EKSF/runtime/RoboTwin-RLinf_support}"
+export ROBOTWIN_ASSETS_PATH="${ROBOTWIN_ASSETS_PATH:-/data/user/leviccdong/EKSF/runtime/etsf_stage0/RoboTwin_v14_dual_gpu_20260831}"
 export ROBOTWIN_PI05_MODEL="${ROBOTWIN_PI05_MODEL:-/data/user/leviccdong/EKSF/models/RLinf-Pi05-RoboTwin-SFT-adjust_bottle}"
 export ROBOT_PLATFORM=ALOHA
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
