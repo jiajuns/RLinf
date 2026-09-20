@@ -68,7 +68,7 @@ exec python examples/embodiment/train_embodied_agent.py \
   env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
-  rollout.unnorm_key=adjust_bottle \
+  +rollout.unnorm_key=adjust_bottle \
   algorithm.reward_type=action_level \
   algorithm.logprob_type=action_level \
   algorithm.adv_type=gae \
