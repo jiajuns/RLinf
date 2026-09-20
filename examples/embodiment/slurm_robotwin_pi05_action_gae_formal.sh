@@ -74,7 +74,7 @@ exec python examples/embodiment/train_embodied_agent.py \
   algorithm.adv_type=gae \
   algorithm.loss_type=actor_critic \
   actor.model.openpi.noise_method=flow_sde \
-  actor.model.openpi.joint_logprob=false \
+  +actor.model.openpi.joint_logprob=false \
   actor.model.openpi.value_after_vlm=true \
   actor.global_batch_size="${ROBOTWIN_GLOBAL_BATCH}" \
   actor.micro_batch_size="${ROBOTWIN_MICRO_BATCH}"
