@@ -45,7 +45,10 @@ export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-1}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_pi05_gae}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_pi05_flow_sde_action_gae}"
 
-cd "${REPO_PATH}"
+# RoboTwin's source archive resolves a small set of asset manifests relative
+# to its own repository root.  Keep that working directory for Ray env
+# workers, while invoke the RLinf entry point by its absolute path.
+cd "${ROBOTWIN_PATH}"
 # This is a conda-prefix environment on the HPC, not a venv (there is no
 # ``bin/activate`` inside it).  Match the environment activation used by the
 # already-running ManiSkill πRL jobs.
@@ -56,7 +59,7 @@ source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 # examples/embodiment/examples/embodiment/config path on the HPC.  The
 # upstream recipe is itself a Hydra primary config (it owns hydra.searchpath),
 # so retain it as the primary and apply this fair-credit overlay as CLI flags.
-exec python examples/embodiment/train_embodied_agent.py \
+exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   --config-path config \
   --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
   runner.max_epochs="${ROBOTWIN_MAX_EPOCHS}" \
