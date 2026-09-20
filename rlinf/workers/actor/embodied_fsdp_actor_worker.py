@@ -84,6 +84,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self._event_influence_model: EventInfluenceModel | None = None
         self._event_influence_optimizer: torch.optim.Optimizer | None = None
         self._event_branch_supervision_count = 0
+        self._event_branch_outcome_count = 0
 
         self.enable_sft_co_train = cfg.actor.get("enable_sft_co_train", False)
         self.version = 0
@@ -142,6 +143,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.cfg.algorithm.adv_type not in (
             "event_smdp_temporal",
             "event_smdp_interventional",
+            "event_smdp_residual",
         ):
             raise ValueError("algorithm.event_value_source=learned_sidecar needs an Event-SMDP advantage")
         sidecar_cfg = self.cfg.algorithm.get("event_sidecar", None)
@@ -163,6 +165,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self._event_sidecar = OnlineEventValueSidecar.from_checkpoints(
             observer_checkpoint, rgb_student_checkpoint, device=sidecar_device
         )
+        target_ema = float(sidecar_cfg.get("target_ema_decay", 0.995))
+        if not 0.0 <= target_ema < 1.0:
+            raise ValueError("algorithm.event_sidecar.target_ema_decay must be in [0, 1)")
+        self._event_sidecar.target_ema_decay = target_ema
         self._event_value_optimizer = torch.optim.AdamW(
             self._event_sidecar.event_value.parameters(),
             lr=float(sidecar_cfg.get("value_lr", 1.0e-4)),
@@ -171,9 +177,18 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         branch_cfg = self.cfg.algorithm.get("event_branch", {})
         if int(branch_cfg.get("num_candidates", 0)):
             representation_dim = self._event_sidecar.event_value.value[1].in_features
+            credit_cfg = self.cfg.algorithm.get("event_credit", {})
+            granularity = str(credit_cfg.get("granularity", "action"))
+            if granularity not in ("action", "chunk"):
+                raise ValueError("algorithm.event_credit.granularity must be 'action' or 'chunk'")
+            influence_action_dim = self.cfg.actor.model.action_dim
+            if granularity == "chunk":
+                # A same-state branch labels the sampled Flow action *chunk*.
+                # Feeding a single token would make its target non-identifiable.
+                influence_action_dim *= self.cfg.actor.model.num_action_chunks
             self._event_influence_model = EventInfluenceModel(
                 representation_dim,
-                self.cfg.actor.model.action_dim,
+                influence_action_dim,
                 hidden_dim=int(branch_cfg.get("influence_hidden_dim", 256)),
             ).to(sidecar_device)
             self._event_influence_optimizer = torch.optim.AdamW(
@@ -181,11 +196,26 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 lr=float(branch_cfg.get("influence_lr", 1.0e-4)),
                 weight_decay=float(branch_cfg.get("influence_weight_decay", 0.0)),
             )
+        resume_path = sidecar_cfg.get("resume_sidecar_path", None)
+        if resume_path:
+            payload = torch.load(Path(resume_path), map_location=sidecar_device, weights_only=False)
+            if payload.get("format") != "eventvalue_rl_sidecars_v1":
+                raise ValueError("event sidecar resume checkpoint has an unsupported format")
+            self._event_sidecar.event_value.load_state_dict(payload["event_value"])
+            self._event_sidecar.target_event_value.load_state_dict(
+                payload.get("target_event_value", payload["event_value"])
+            )
+            self._event_branch_supervision_count = int(payload.get("branch_supervision_count", 0))
+            self._event_branch_outcome_count = int(payload.get("branch_outcome_count", 0))
+            if self._event_influence_model is not None and payload.get("influence_model") is not None:
+                self._event_influence_model.load_state_dict(payload["influence_model"])
+            if self._event_influence_optimizer is not None and payload.get("influence_optimizer") is not None:
+                self._event_influence_optimizer.load_state_dict(payload["influence_optimizer"])
 
     def _event_action_tensor(
         self, *, chunks: int, batch: int, action_chunk: int, device: torch.device
     ) -> torch.Tensor:
-        """Return rollout actions as ``[B,C*K,action_dim]`` for ``I_ξ``."""
+        """Return actions at the same granularity as branch interventions."""
         actions = self.rollout_batch.get("actions")
         if actions is None:
             raise RuntimeError("Event Influence Model needs recorded executed actions")
@@ -197,9 +227,34 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 "Event Influence Model expects flattened executed actions with "
                 f"width {action_chunk * action_dim}, got {actions.shape[-1]}"
             )
-        return actions.to(device).reshape(chunks, batch, action_chunk, action_dim).permute(
-            1, 0, 2, 3
-        ).reshape(batch, chunks * action_chunk, action_dim)
+        action_chunks = actions.to(device).reshape(chunks, batch, action_chunk, action_dim)
+        granularity = str(self.cfg.algorithm.get("event_credit", {}).get("granularity", "action"))
+        if granularity == "chunk":
+            return action_chunks.permute(1, 0, 2, 3).reshape(batch, chunks, action_chunk * action_dim)
+        if granularity != "action":
+            raise ValueError("event credit granularity must be 'action' or 'chunk'")
+        return action_chunks.permute(1, 0, 2, 3).reshape(batch, chunks * action_chunk, action_dim)
+
+    def _event_credit_mix_lambda(self) -> float:
+        """Return a conservative, branch-gated Event residual coefficient.
+
+        This makes ``lambda=0`` a literal πRL/GAE control until the configured
+        amount of matched-state evidence exists.  The schedule is driven by
+        optimizer updates rather than wall clock time so resumed Slurm jobs do
+        not accidentally skip the safety warm-up.
+        """
+        cfg = self.cfg.algorithm.get("event_credit", {})
+        required_labels = int(cfg.get("min_supervision_for_actor", 0))
+        if self._event_branch_supervision_count < required_labels:
+            return 0.0
+        maximum = float(cfg.get("max_lambda", 0.0))
+        if not 0.0 <= maximum <= 1.0:
+            raise ValueError("algorithm.event_credit.max_lambda must be in [0, 1]")
+        warmup = int(cfg.get("warmup_optimizer_steps", 0))
+        ramp = int(cfg.get("ramp_optimizer_steps", 1))
+        if self.optimizer_steps < warmup:
+            return 0.0
+        return maximum * min(1.0, (self.optimizer_steps - warmup) / max(ramp, 1))
 
     def _update_influence_from_branches(
         self,
@@ -225,10 +280,19 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         actions = self._event_action_tensor(
             chunks=chunks, batch=batch, action_chunk=action_chunk, device=device
         )
-        representations = sidecar_rollout.action_representation[:, :-1]
-        prediction = self._event_influence_model(representations, actions).reshape(
-            batch, chunks, action_chunk
-        ).permute(1, 0, 2)
+        granularity = str(self.cfg.algorithm.get("event_credit", {}).get("granularity", "action"))
+        if granularity == "chunk":
+            representations = sidecar_rollout.chunk_output.representation[:, :-1]
+            chunk_prediction = self._event_influence_model(representations, actions).transpose(0, 1)
+            # Keep the native [C,B,K] sidecar interface.  The chunk-level
+            # advantage preprocessor selects token zero, so the repeated
+            # entries are never interpreted as independently supervised.
+            prediction = chunk_prediction.unsqueeze(-1).expand(-1, -1, action_chunk)
+        else:
+            representations = sidecar_rollout.action_representation[:, :-1]
+            prediction = self._event_influence_model(representations, actions).reshape(
+                batch, chunks, action_chunk
+            ).permute(1, 0, 2)
         influence_loss = None
         branch_mask = self.rollout_batch.get("branch_mask")
         required_branch_fields = (
@@ -265,12 +329,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 # across matched candidates preserves beneficial and harmful
                 # signs in the signed Event-SMDP allocator.
                 target = branch_returns[..., 0] - branch_returns.mean(dim=-1)
-                influence_loss = EventInfluenceModel.loss(prediction[..., 0], target, mask)
+                direct_prediction = chunk_prediction if granularity == "chunk" else prediction[..., 0]
+                influence_loss = EventInfluenceModel.loss(direct_prediction, target, mask)
                 self._event_influence_optimizer.zero_grad(set_to_none=True)
                 influence_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self._event_influence_model.parameters(), 1.0)
                 self._event_influence_optimizer.step()
                 self._event_branch_supervision_count += int(mask.sum().item())
+                self._event_branch_outcome_count += int(mask.sum().item() * branch_returns.shape[-1])
 
         minimum = int(self.cfg.algorithm.get("event_branch", {}).get("min_supervision", 1))
         if self._event_branch_supervision_count < minimum:
@@ -353,6 +419,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self._event_sidecar.event_value.parameters(), 1.0)
         self._event_value_optimizer.step()
+        self._event_sidecar.update_target_event_value()
         return loss.detach(), influence_loss
 
     def model_provider_func(self) -> nn.Module:
@@ -374,6 +441,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         payload: dict[str, object] = {
             "format": "eventvalue_rl_sidecars_v1",
             "event_value": self._event_sidecar.event_value.state_dict(),
+            "target_event_value": self._event_sidecar.target_event_value.state_dict(),
             "observer": self._event_sidecar.observer.state_dict(),
             "rgb_student": (
                 self._event_sidecar.rgb_student.state_dict()
@@ -382,6 +450,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             ),
             "proprio_time_delta": self._event_sidecar.proprio_time_delta,
             "branch_supervision_count": self._event_branch_supervision_count,
+            "branch_outcome_count": self._event_branch_outcome_count,
         }
         if self._event_influence_model is not None:
             payload["influence_model"] = self._event_influence_model.state_dict()
@@ -633,6 +702,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "influence_temperature": self.cfg.algorithm.get(
                 "influence_temperature", 1.0
             ),
+            "event_mix_lambda": self._event_credit_mix_lambda(),
+            "influence_beta": self.cfg.algorithm.get("event_credit", {}).get("influence_beta", 0.0),
+            "influence_clip": self.cfg.algorithm.get("event_credit", {}).get("influence_clip", 3.0),
         }
 
         advantages_and_returns = calculate_adv_and_returns(**kwargs)
@@ -651,6 +723,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             rollout_metrics["event/branch_supervision_count"] = torch.tensor(
                 float(self._event_branch_supervision_count)
             )
+            rollout_metrics["event/branch_outcome_count"] = torch.tensor(
+                float(self._event_branch_outcome_count)
+            )
+        if self.cfg.algorithm.adv_type == "event_smdp_residual":
+            rollout_metrics["event/mix_lambda"] = torch.tensor(self._event_credit_mix_lambda())
         return rollout_metrics
 
     @Worker.timer("actor/compute_opd_teacher_logprobs")
@@ -1035,7 +1112,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         ]:
             kwargs["prev_logprobs"] = prev_logprobs
 
-        compute_values = self.cfg.algorithm.adv_type == "gae"
+        compute_values = self.cfg.algorithm.adv_type in ("gae", "event_smdp_residual")
         with self.amp_context:
             output_dict = self.model(
                 forward_inputs=forward_inputs,

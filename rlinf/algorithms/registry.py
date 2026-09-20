@@ -110,7 +110,13 @@ def calculate_adv_and_returns(**kwargs) -> tuple[torch.Tensor, Optional[torch.Te
                 res["returns"] = returns
         else:
             kwargs = preprocess_embodied_advantages_inputs(**kwargs)
-            if adv_type not in ("gae", "grpo_video", "event_smdp_interventional", "event_smdp_temporal"):
+            if adv_type not in (
+                "gae",
+                "grpo_video",
+                "event_smdp_interventional",
+                "event_smdp_temporal",
+                "event_smdp_residual",
+            ):
                 kwargs = calculate_scores(**kwargs)
             advantages, returns = fn(**kwargs)
             res = postprocess_embodied_advantages_outputs(

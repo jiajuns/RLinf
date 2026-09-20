@@ -38,8 +38,10 @@ def event_smdp_credit(
     *,
     gamma: float,
     influence_temperature: float = 1.0,
+    influence_beta: float = 0.0,
+    influence_clip: float = 3.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build SMDP targets and allocate each event advantage by intervention.
+    """Build credit-conserving SMDP targets and within-event redistribution.
 
     ``event_ids[t]`` identifies the event active while action ``t`` is executed.
     Each contiguous id run is an event, hence reused ids must begin a new run.
@@ -47,20 +49,29 @@ def event_smdp_credit(
     :math:`I(s_t,a_t)=Y(s_t,a_t)-mean_a Y(s_t,a)` from same-state branches.
 
     Event j obtains ``R_j + gamma**D_j * V_E(next) - V_E(start)``.  The
-    interventional allocation preserves the *sign* of the measured influence:
-    an action that lowers future Event Value receives negative PPO credit even
-    inside an otherwise successful event.  Its magnitude is normalized by the
-    event's total absolute influence.  This intentionally differs from a
-    softmax: softmax can only assign positive weights and therefore quietly
-    rewards harmful actions.
+    The Event-SMDP advantage determines an event's *total* PPO credit.  The
+    intervention signal may only redistribute this credit within the event;
+    it never decides the total sign.  This is deliberately more conservative
+    than the historical signed-|I| allocator: a sparsely trained Influence
+    Model must not be able to turn a successful SFT action into a negative PPO
+    update merely by predicting the wrong sign.
 
-    An all-zero influence run is the temporal/uniform ablation.  In that case
-    every action receives the shared Event-SMDP advantage instead of a silent
-    zero-gradient event.
+    For an event of duration ``D`` the base allocation is ``A_E / D``.  The
+    centered, clipped influence residual has zero sum, so
+    ``sum_t A_t == A_E`` up to floating point error:
+
+    ``A_t = A_E/D + beta * |A_E| * centered_zscore(I_t)``.
+
+    With ``influence_beta=0`` (the default) this is the uniform Event-SMDP
+    ablation.  Callers combine this Event credit with GAE through
+    :func:`compute_event_smdp_residual_advantages`; this function itself does
+    not silently replace a stable action critic.
     """
     _check_inputs(rewards, dones, event_ids, event_values, intervention_influence)
     if not 0 < gamma <= 1 or influence_temperature <= 0:
         raise ValueError("invalid gamma or influence temperature")
+    if influence_beta < 0 or influence_clip <= 0:
+        raise ValueError("influence_beta must be nonnegative and influence_clip positive")
     steps, batch = rewards.shape
     advantages = torch.zeros_like(rewards)
     returns = event_values[:-1].clone()
@@ -81,19 +92,19 @@ def event_smdp_credit(
             bootstrap = event_values[end, b] if not terminal else event_reward.new_zeros(())
             event_return = event_reward + (gamma**duration) * bootstrap
             event_advantage = event_return - event_values[start, b]
+            base = event_advantage / duration
+            advantages[start:end, b] = base
             scaled = intervention_influence[start:end, b] / influence_temperature
-            absolute = scaled.abs()
-            denominator = absolute.sum()
-            if bool(denominator <= torch.finfo(absolute.dtype).eps):
-                # Uniform temporal Event-SMDP allocation used by the no-branch
-                # ablation, and a stable fallback before an Influence Model has
-                # accumulated useful branch supervision.
-                advantages[start:end, b] = event_advantage
-            else:
-                allocation = duration * absolute / denominator
-                advantages[start:end, b] = (
-                    allocation * scaled.sign() * event_advantage.abs()
+            centered = scaled - scaled.mean()
+            std = centered.std(unbiased=False)
+            if influence_beta > 0 and bool(std > torch.finfo(centered.dtype).eps):
+                redistribution = (centered / (std + torch.finfo(centered.dtype).eps)).clamp(
+                    -influence_clip, influence_clip
                 )
+                # Clipping can change the mean; recentering restores exact
+                # event-credit conservation.
+                redistribution = redistribution - redistribution.mean()
+                advantages[start:end, b] = base + influence_beta * event_advantage.abs() * redistribution
             returns[start:end, b] = event_values[start:end, b] + advantages[start:end, b]
             start = end
     return advantages, returns
@@ -110,13 +121,18 @@ def compute_event_smdp_interventional_advantages(
     normalize_advantages: bool = True,
     loss_mask: torch.Tensor | None = None,
     influence_temperature: float = 1.0,
+    influence_beta: float = 0.0,
+    influence_clip: float = 3.0,
     **_kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if event_ids is None or event_values is None or intervention_influence is None:
         raise ValueError("event_smdp_interventional requires event_ids, event_values and intervention_influence")
     advantages, returns = event_smdp_credit(
         rewards, dones, event_ids, event_values, intervention_influence,
-        gamma=gamma, influence_temperature=influence_temperature,
+        gamma=gamma,
+        influence_temperature=influence_temperature,
+        influence_beta=influence_beta,
+        influence_clip=influence_clip,
     )
     if normalize_advantages:
         advantages = safe_normalize(advantages, loss_mask=loss_mask)
@@ -149,6 +165,64 @@ def compute_event_smdp_temporal_advantages(
         torch.zeros_like(event_ids, dtype=event_values.dtype),
         gamma=gamma,
     )
+    if normalize_advantages:
+        advantages = safe_normalize(advantages, loss_mask=loss_mask)
+    return advantages, returns
+
+
+@register_advantage("event_smdp_residual")
+def compute_event_smdp_residual_advantages(
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    values: torch.Tensor | None = None,
+    event_ids: torch.Tensor | None = None,
+    event_values: torch.Tensor | None = None,
+    intervention_influence: torch.Tensor | None = None,
+    gamma: float = 1.0,
+    gae_lambda: float = 1.0,
+    event_mix_lambda: float = 0.0,
+    influence_temperature: float = 1.0,
+    influence_beta: float = 0.0,
+    influence_clip: float = 3.0,
+    normalize_advantages: bool = True,
+    loss_mask: torch.Tensor | None = None,
+    **_kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Conservative V2 estimator: GAE plus a credit-conserving Event residual.
+
+    ``event_mix_lambda=0`` is exactly action-level GAE, which makes the
+    warm-up safe and directly testable.  The Event branch is enabled only by
+    increasing the lambda after Influence Model calibration.  Returns target
+    the original π0.5 critic, while ``V_E`` remains a separate sidecar.
+    """
+    if values is None or event_ids is None or event_values is None or intervention_influence is None:
+        raise ValueError("event_smdp_residual requires values, event IDs/values and intervention influence")
+    if not 0.0 <= event_mix_lambda <= 1.0:
+        raise ValueError("event_mix_lambda must be in [0, 1]")
+    # Local import avoids a module-level registry import cycle.
+    from rlinf.algorithms.advantages import compute_gae_advantages_and_returns
+
+    gae_advantages, _ = compute_gae_advantages_and_returns(
+        rewards,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        values=values,
+        dones=dones,
+        normalize_advantages=False,
+    )
+    event_advantages, _ = event_smdp_credit(
+        rewards,
+        dones,
+        event_ids,
+        event_values,
+        intervention_influence,
+        gamma=gamma,
+        influence_temperature=influence_temperature,
+        influence_beta=influence_beta,
+        influence_clip=influence_clip,
+    )
+    advantages = (1.0 - event_mix_lambda) * gae_advantages + event_mix_lambda * event_advantages
+    returns = values[:-1] + advantages
     if normalize_advantages:
         advantages = safe_normalize(advantages, loss_mask=loss_mask)
     return advantages, returns

@@ -8,6 +8,7 @@ also ensuring PPO never backpropagates into SAM or simulator oracle labels.
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -62,10 +63,18 @@ class OnlineEventValueSidecar(nn.Module):
         rgb_student: RGBRoleFeatureStudent | None = None,
         *,
         proprio_time_delta: float = 0.1,
+        target_ema_decay: float = 0.995,
     ) -> None:
         super().__init__()
         self.observer = observer
         self.event_value = event_value
+        if not 0.0 <= target_ema_decay < 1.0:
+            raise ValueError("target_ema_decay must be in [0, 1)")
+        self.target_event_value = copy.deepcopy(event_value)
+        self.target_ema_decay = target_ema_decay
+        self.target_event_value.eval()
+        for parameter in self.target_event_value.parameters():
+            parameter.requires_grad_(False)
         self.rgb_student = rgb_student
         if proprio_time_delta <= 0:
             raise ValueError("proprio_time_delta must be positive")
@@ -116,6 +125,12 @@ class OnlineEventValueSidecar(nn.Module):
                 parameter.requires_grad_(False)
 
     @torch.no_grad()
+    def update_target_event_value(self) -> None:
+        """EMA-update the bootstrap critic after an online ``V_E`` step."""
+        for target, online in zip(self.target_event_value.parameters(), self.event_value.parameters(), strict=True):
+            target.mul_(self.target_ema_decay).add_(online, alpha=1.0 - self.target_ema_decay)
+
+    @torch.no_grad()
     def infer_images(
         self,
         head_images: torch.Tensor,
@@ -123,6 +138,7 @@ class OnlineEventValueSidecar(nn.Module):
         measured_state16: torch.Tensor | None = None,
         *,
         boundary_threshold: float = 0.5,
+        use_target_value: bool = False,
     ) -> EventSidecarOutput:
         """Run the online RGB student then the frozen Event Observer."""
         if self.rgb_student is None:
@@ -131,15 +147,21 @@ class OnlineEventValueSidecar(nn.Module):
             self.rgb_student(
                 head_images,
                 wrist_images,
-                measured_state16,
-                proprio_time_delta=self.proprio_time_delta,
+            measured_state16,
+            proprio_time_delta=self.proprio_time_delta,
             ),
             boundary_threshold=boundary_threshold,
+            use_target_value=use_target_value,
         )
 
     @torch.no_grad()
     def infer(
-        self, features: torch.Tensor, mount_tokens: torch.Tensor | None = None, *, boundary_threshold: float = 0.5
+        self,
+        features: torch.Tensor,
+        mount_tokens: torch.Tensor | None = None,
+        *,
+        boundary_threshold: float = 0.5,
+        use_target_value: bool = False,
     ) -> EventSidecarOutput:
         """Infer event IDs and ``V_E`` without exposing oracle labels online.
 
@@ -156,7 +178,7 @@ class OnlineEventValueSidecar(nn.Module):
         event_ids = boundaries.to(torch.long).cumsum(dim=1) - 1
         return EventSidecarOutput(
             representation=prediction.representation,
-            values=self.event_value(prediction.representation),
+            values=(self.target_event_value if use_target_value else self.event_value)(prediction.representation),
             event_ids=event_ids,
             boundary_probability=boundary_probability,
             progress=prediction.progress,
@@ -184,8 +206,9 @@ class OnlineEventValueSidecar(nn.Module):
         values = self.event_value(representation).transpose(0, 1)
         if values.shape != dones.shape or rewards.shape != event_ids.shape or values.shape[0] != rewards.shape[0] + 1:
             raise ValueError("Event Value rollout tensors have inconsistent time-major shapes")
+        target_values = self.target_event_value(representation).transpose(0, 1)
         _, targets = event_smdp_credit(
-            rewards, dones, event_ids, values.detach(), torch.zeros_like(rewards), gamma=gamma
+            rewards, dones, event_ids, target_values, torch.zeros_like(rewards), gamma=gamma
         )
         return F.smooth_l1_loss(values[:-1], targets.detach())
 
@@ -345,6 +368,8 @@ def infer_branch_future_event_values(
             repeated_measured = prefix_measured[:, None].expand(-1, candidates, -1, -1)
             endpoint_measured = branch_measured_state16[chunk_idx].unsqueeze(2)
             sequence_measured = torch.cat((repeated_measured, endpoint_measured), dim=2).flatten(0, 1)
-        endpoint_values = sidecar.infer_images(sequence_head, sequence_wrist, sequence_measured).values[:, -1]
+        endpoint_values = sidecar.infer_images(
+            sequence_head, sequence_wrist, sequence_measured, use_target_value=True
+        ).values[:, -1]
         values.append(endpoint_values.reshape(batch, candidates))
     return torch.stack(values, dim=0)

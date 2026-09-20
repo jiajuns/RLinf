@@ -119,7 +119,12 @@ def evaluate(
     observer: EventObserver, critic: EventValueCritic, loader: DataLoader, device: torch.device, gamma: float
 ) -> dict[str, float]:
     observer.eval(); critic.eval()
-    totals = {"loss": 0.0, "boundary_correct": 0.0, "boundary_count": 0.0, "progress_abs": 0.0, "value_abs": 0.0}
+    totals = {
+        "loss": 0.0, "boundary_correct": 0.0, "boundary_count": 0.0,
+        "boundary_tp": 0.0, "boundary_fp": 0.0, "boundary_fn": 0.0,
+        "boundary_tp_at_3": 0.0, "boundary_fp_at_3": 0.0, "boundary_fn_at_3": 0.0,
+        "progress_abs": 0.0, "value_abs": 0.0,
+    }
     with torch.no_grad():
         for batch in loader:
             batch = {key: value.to(device) for key, value in batch.items()}
@@ -132,13 +137,47 @@ def evaluate(
             returns = discounted_returns(batch["rewards"], batch["dones"], gamma)
             mask = batch["valid_mask"].bool()
             totals["loss"] += float(sum(losses.values()).item())
-            totals["boundary_correct"] += float(((prediction.boundary_logits.sigmoid() >= .5) == batch["boundary_target"].bool())[mask].sum())
+            boundary_prediction = prediction.boundary_logits.sigmoid() >= .5
+            boundary_target = batch["boundary_target"].bool()
+            totals["boundary_correct"] += float((boundary_prediction == boundary_target)[mask].sum())
             totals["boundary_count"] += float(mask.sum())
+            totals["boundary_tp"] += float((boundary_prediction & boundary_target & mask).sum())
+            totals["boundary_fp"] += float((boundary_prediction & ~boundary_target & mask).sum())
+            totals["boundary_fn"] += float((~boundary_prediction & boundary_target & mask).sum())
+            # Boundary labels are intrinsically frame-ambiguous.  Report a
+            # tolerance-aware greedy F1 in addition to exact F1; accuracy is
+            # retained only as a legacy diagnostic because non-boundaries are
+            # highly imbalanced.
+            for predicted_row, target_row, mask_row in zip(boundary_prediction, boundary_target, mask, strict=True):
+                predicted_indices = predicted_row[mask_row].nonzero(as_tuple=False).flatten().tolist()
+                target_indices = target_row[mask_row].nonzero(as_tuple=False).flatten().tolist()
+                unmatched = set(target_indices)
+                matched = 0
+                for index in predicted_indices:
+                    candidates = [truth for truth in unmatched if abs(index - truth) <= 3]
+                    if candidates:
+                        unmatched.remove(min(candidates, key=lambda truth: abs(index - truth)))
+                        matched += 1
+                totals["boundary_tp_at_3"] += matched
+                totals["boundary_fp_at_3"] += len(predicted_indices) - matched
+                totals["boundary_fn_at_3"] += len(target_indices) - matched
             totals["progress_abs"] += float((prediction.progress.sub(batch["progress_target"]).abs()[mask]).sum())
             totals["value_abs"] += float((values.sub(returns).abs()[mask]).sum())
     count = max(len(loader), 1); frames = max(totals["boundary_count"], 1.0)
-    return {"loss": totals["loss"] / count, "boundary_accuracy": totals["boundary_correct"] / frames,
-            "progress_mae": totals["progress_abs"] / frames, "event_value_mae": totals["value_abs"] / frames}
+    precision = totals["boundary_tp"] / max(totals["boundary_tp"] + totals["boundary_fp"], 1.0)
+    recall = totals["boundary_tp"] / max(totals["boundary_tp"] + totals["boundary_fn"], 1.0)
+    p_at_3 = totals["boundary_tp_at_3"] / max(totals["boundary_tp_at_3"] + totals["boundary_fp_at_3"], 1.0)
+    r_at_3 = totals["boundary_tp_at_3"] / max(totals["boundary_tp_at_3"] + totals["boundary_fn_at_3"], 1.0)
+    return {
+        "loss": totals["loss"] / count,
+        "boundary_accuracy": totals["boundary_correct"] / frames,
+        "boundary_precision": precision,
+        "boundary_recall": recall,
+        "boundary_f1": 2 * precision * recall / max(precision + recall, 1.0e-12),
+        "boundary_f1_at_3": 2 * p_at_3 * r_at_3 / max(p_at_3 + r_at_3, 1.0e-12),
+        "progress_mae": totals["progress_abs"] / frames,
+        "event_value_mae": totals["value_abs"] / frames,
+    }
 
 
 def main() -> None:

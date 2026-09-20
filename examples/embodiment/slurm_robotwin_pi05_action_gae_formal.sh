@@ -47,6 +47,13 @@ export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-2}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-1}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_pi05_gae}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_pi05_flow_sde_action_gae}"
+# Conservative πRL control for the V2 comparison.  Override these with the
+# historical values only when reproducing the original V1 run; Ours uses the
+# same values so a gain cannot be attributed to a safer PPO schedule.
+export ROBOTWIN_ACTOR_LR="${ROBOTWIN_ACTOR_LR:-2.0e-6}"
+export ROBOTWIN_UPDATE_EPOCHS="${ROBOTWIN_UPDATE_EPOCHS:-2}"
+export ROBOTWIN_CLIP_RATIO="${ROBOTWIN_CLIP_RATIO:-0.1}"
+export ROBOTWIN_CRITIC_WARMUP_STEPS="${ROBOTWIN_CRITIC_WARMUP_STEPS:-10}"
 
 # RoboTwin's source archive resolves a small set of asset manifests relative
 # to its own repository root.  Keep that working directory for Ray env
@@ -83,6 +90,11 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   algorithm.logprob_type=action_level \
   algorithm.adv_type=gae \
   algorithm.loss_type=actor_critic \
+  algorithm.update_epoch="${ROBOTWIN_UPDATE_EPOCHS}" \
+  algorithm.clip_ratio_high="${ROBOTWIN_CLIP_RATIO}" \
+  algorithm.clip_ratio_low="${ROBOTWIN_CLIP_RATIO}" \
+  actor.optim.lr="${ROBOTWIN_ACTOR_LR}" \
+  actor.optim.critic_warmup_steps="${ROBOTWIN_CRITIC_WARMUP_STEPS}" \
   actor.model.openpi.noise_method=flow_sde \
   +actor.model.openpi.joint_logprob=false \
   actor.model.openpi.value_after_vlm=false \

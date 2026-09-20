@@ -115,7 +115,7 @@ def preprocess_embodied_advantages_inputs(
     )
     dones = flattened_dones_full[-(n_steps + 1) :]
 
-    if kwargs["adv_type"] == "gae":
+    if kwargs["adv_type"] in ("gae", "event_smdp_residual"):
         if values is None:
             raise ValueError("GAE requires values or an explicit critic-free advantage")
         if values.ndim != 3:
@@ -136,22 +136,40 @@ def preprocess_embodied_advantages_inputs(
         )
         values = flattened_values_full[: n_steps + 1]
 
-    if kwargs["adv_type"] in ("event_smdp_interventional", "event_smdp_temporal"):
+    if kwargs["adv_type"] in (
+        "event_smdp_interventional",
+        "event_smdp_temporal",
+        "event_smdp_residual",
+    ):
         if event_ids is None or event_values is None:
             raise ValueError(
                 f"{kwargs['adv_type']} requires event_ids and event_values in the rollout batch"
             )
-        if kwargs["adv_type"] == "event_smdp_interventional" and intervention_influence is None:
-            raise ValueError("event_smdp_interventional requires intervention_influence")
-        event_ids = event_ids.transpose(1, 2).reshape(n_steps, bsz)
-        if intervention_influence is not None:
-            intervention_influence = intervention_influence.transpose(1, 2).reshape(
-                n_steps, bsz
+        if kwargs["adv_type"] in ("event_smdp_interventional", "event_smdp_residual") and intervention_influence is None:
+            raise ValueError(f"{kwargs['adv_type']} requires intervention_influence")
+        # V2 may intentionally operate at policy-chunk granularity: a branch
+        # counterfactual labels the sampled *chunk*, not each of its K action
+        # tokens.  With chunk-level rewards/logprobs retain only the chunk
+        # boundary event fields instead of incorrectly flattening K copies.
+        if kwargs["reward_type"] == "chunk_level":
+            event_ids = event_ids[..., 0]
+            if intervention_influence is not None:
+                intervention_influence = intervention_influence[..., 0]
+            event_values = event_values[..., 0]
+            event_ids = event_ids.reshape(n_steps, bsz)
+            if intervention_influence is not None:
+                intervention_influence = intervention_influence.reshape(n_steps, bsz)
+            event_values = event_values.reshape(n_steps + 1, bsz)
+        else:
+            event_ids = event_ids.transpose(1, 2).reshape(n_steps, bsz)
+            if intervention_influence is not None:
+                intervention_influence = intervention_influence.transpose(1, 2).reshape(
+                    n_steps, bsz
+                )
+            flattened_event_values = event_values.transpose(1, 2).reshape(
+                (num_chunk + 1) * chunk_size, bsz
             )
-        flattened_event_values = event_values.transpose(1, 2).reshape(
-            (num_chunk + 1) * chunk_size, bsz
-        )
-        event_values = flattened_event_values[: n_steps + 1]
+            event_values = flattened_event_values[: n_steps + 1]
 
     kwargs.update(
         {
