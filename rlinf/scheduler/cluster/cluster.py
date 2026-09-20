@@ -365,6 +365,21 @@ class Cluster:
             if ray_tmpdir:
                 os.makedirs(ray_tmpdir, exist_ok=True)
                 ray_init_kwargs["_temp_dir"] = ray_tmpdir
+            # ``_temp_dir`` isolates Ray's discovery files, but Ray still
+            # defaults every local head's dashboard to port 8265.  Independent
+            # one-GPU Slurm jobs may share a multi-GPU host, in which case the
+            # second job would otherwise fail while its workers are starting.
+            # A job script can provide a deterministic, per-job port without
+            # affecting normal cluster-attached Ray operation.
+            ray_dashboard_port = os.environ.get("RLINF_RAY_DASHBOARD_PORT")
+            if ray_dashboard_port:
+                try:
+                    ray_init_kwargs["dashboard_port"] = int(ray_dashboard_port)
+                except ValueError as exc:
+                    raise ValueError(
+                        "RLINF_RAY_DASHBOARD_PORT must be an integer, got "
+                        f"{ray_dashboard_port!r}."
+                    ) from exc
             self._logger.info("Starting an isolated local Ray head for this job.")
             ray.init(**ray_init_kwargs)
         else:

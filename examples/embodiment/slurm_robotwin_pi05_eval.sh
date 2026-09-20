@@ -26,6 +26,10 @@ set -euo pipefail
 export RLINF_LOCAL_RAY=1
 unset RAY_ADDRESS
 export RLINF_RAY_TMPDIR="/tmp/rlinf_ray_${SLURM_JOB_ID:?}"
+# A unique dashboard port is equally necessary: Ray defaults every local head
+# to 8265, even when its temp directory is job-local.  The chosen range is
+# deterministic per Slurm job and avoids the standard dashboard port.
+export RLINF_RAY_DASHBOARD_PORT="${RLINF_RAY_DASHBOARD_PORT:-$((20000 + SLURM_JOB_ID % 20000))}"
 export RLINF_COMPONENT_PLACEMENT="${RLINF_COMPONENT_PLACEMENT:-0}"
 export REPO_PATH="${REPO_PATH:-/data/user/leviccdong/EKSF/code/RLinf-piRL}"
 export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
