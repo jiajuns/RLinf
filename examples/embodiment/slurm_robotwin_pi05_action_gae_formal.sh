@@ -20,6 +20,7 @@ unset RAY_ADDRESS
 export RLINF_RAY_TMPDIR="/tmp/rlinf_ray_${SLURM_JOB_ID:?}"
 
 export REPO_PATH="${REPO_PATH:-/data/user/leviccdong/EKSF/code/RLinf-piRL}"
+export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
 export ROBOTWIN_PATH="${ROBOTWIN_PATH:-/data/user/leviccdong/EKSF/runtime/etsf_stage0/RoboTwin_v14_dual_gpu_20260831}"
 export ROBOTWIN_ASSETS_PATH="${ROBOTWIN_ASSETS_PATH:-${ROBOTWIN_PATH}}"
 export ROBOTWIN_PI05_MODEL="${ROBOTWIN_PI05_MODEL:-/data/user/leviccdong/EKSF/models/RLinf-Pi05-RoboTwin-SFT-adjust_bottle}"
