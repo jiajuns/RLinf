@@ -46,10 +46,17 @@ def event_smdp_credit(
     ``event_values[t]`` is :math:`V_E(z_t^E)` and influence is
     :math:`I(s_t,a_t)=Y(s_t,a_t)-mean_a Y(s_t,a)` from same-state branches.
 
-    Event j obtains ``R_j + gamma**D_j * V_E(next) - V_E(start)``.  A softmax
-    over branch influence assigns credit inside the event.  Multiplying by its
-    duration keeps the mean per-action advantage equal to the event advantage,
-    so PPO's scale does not silently shrink for long events.
+    Event j obtains ``R_j + gamma**D_j * V_E(next) - V_E(start)``.  The
+    interventional allocation preserves the *sign* of the measured influence:
+    an action that lowers future Event Value receives negative PPO credit even
+    inside an otherwise successful event.  Its magnitude is normalized by the
+    event's total absolute influence.  This intentionally differs from a
+    softmax: softmax can only assign positive weights and therefore quietly
+    rewards harmful actions.
+
+    An all-zero influence run is the temporal/uniform ablation.  In that case
+    every action receives the shared Event-SMDP advantage instead of a silent
+    zero-gradient event.
     """
     _check_inputs(rewards, dones, event_ids, event_values, intervention_influence)
     if not 0 < gamma <= 1 or influence_temperature <= 0:
@@ -74,8 +81,19 @@ def event_smdp_credit(
             bootstrap = event_values[end, b] if not terminal else event_reward.new_zeros(())
             event_return = event_reward + (gamma**duration) * bootstrap
             event_advantage = event_return - event_values[start, b]
-            weights = torch.softmax(intervention_influence[start:end, b] / influence_temperature, dim=0)
-            advantages[start:end, b] = duration * weights * event_advantage
+            scaled = intervention_influence[start:end, b] / influence_temperature
+            absolute = scaled.abs()
+            denominator = absolute.sum()
+            if bool(denominator <= torch.finfo(absolute.dtype).eps):
+                # Uniform temporal Event-SMDP allocation used by the no-branch
+                # ablation, and a stable fallback before an Influence Model has
+                # accumulated useful branch supervision.
+                advantages[start:end, b] = event_advantage
+            else:
+                allocation = duration * absolute / denominator
+                advantages[start:end, b] = (
+                    allocation * scaled.sign() * event_advantage.abs()
+                )
             returns[start:end, b] = event_values[start:end, b] + advantages[start:end, b]
             start = end
     return advantages, returns
