@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=fetch_rw_pi05_sft
 #SBATCH --partition=acd_u
+# The local ACD policy rejects all jobs without an explicit GPU request, even
+# purely I/O-bound model downloads.  The process does not initialize CUDA and
+# releases this allocation immediately after the checkpoint is complete.
+#SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
