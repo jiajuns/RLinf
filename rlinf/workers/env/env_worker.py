@@ -556,7 +556,12 @@ class EnvWorker(Worker):
                         self.model_cfg.num_action_chunks,
                         self.model_cfg.action_dim,
                     ),
-                    dtype=exec_actions.dtype,
+                    # ``exec_actions`` can be a NumPy array on the RoboTwin
+                    # worker path, whose ``np.dtype`` is not accepted by
+                    # torch.zeros.  Skipped branch entries are masked out, so
+                    # a stable float32 placeholder is the correct transport
+                    # representation.
+                    dtype=torch.float32,
                 ),
                 "branch_success": torch.zeros(
                     (branch_batch_size, branch_candidates), dtype=torch.bool

@@ -23,7 +23,10 @@ export ROBOTWIN_LOG_PATH="${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smok
 export RLINF_COMPONENT_PLACEMENT="${RLINF_COMPONENT_PLACEMENT:-0}"
 export RLINF_LOCAL_RAY=1
 unset RAY_ADDRESS
-export RLINF_RAY_TMPDIR="${RLINF_RAY_TMPDIR:-/tmp/rlinf_ray_a6000_event_smoke}"
+# A6000's root filesystem is nearly full; Ray object spilling/logs must stay
+# on the 290-GB data disk rather than under /tmp.
+export RLINF_RAY_TMPDIR="${RLINF_RAY_TMPDIR:-${A6000_ROOT}/ray_tmp}"
+export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
@@ -33,7 +36,7 @@ export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-128}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-8}"
 export ROBOTWIN_BRANCH_COLLECT_EPOCHS="${ROBOTWIN_BRANCH_COLLECT_EPOCHS:-1}"
 
-mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}"
+mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}" "${RLINF_RAY_TMPDIR}"
 "${A6000_ROOT}/env_pirl_pi05/bin/python" \
   "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   --config-path config --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
