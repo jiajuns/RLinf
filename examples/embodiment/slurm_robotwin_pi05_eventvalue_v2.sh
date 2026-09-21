@@ -27,11 +27,22 @@ export ROBOTWIN_EVENT_SIDECAR_RESUME="${ROBOTWIN_EVENT_SIDECAR_RESUME:?set branc
 export ROBOT_PLATFORM=ALOHA
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export ROBOTWIN_MAX_EPOCHS="${ROBOTWIN_MAX_EPOCHS:-1000}"
 export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-128}"
-export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-128}"
+# Keep the official 128 fixed-seed evaluation episodes, but evaluate them in
+# eight 16-environment waves.  Four-way π0.5 FSDP plus 128 concurrent eval
+# environments OOMs during the attention-prefix cache construction.
+export ROBOTWIN_EVAL_ENVS="${ROBOTWIN_EVAL_ENVS:-16}"
+export ROBOTWIN_EVAL_ROLLOUT_EPOCHS="${ROBOTWIN_EVAL_ROLLOUT_EPOCHS:-8}"
+export ROBOTWIN_VAL_INTERVAL="${ROBOTWIN_VAL_INTERVAL:-25}"
+export ROBOTWIN_SAVE_INTERVAL="${ROBOTWIN_SAVE_INTERVAL:-25}"
 export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-1024}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-32}"
+export ROBOTWIN_EVENT_MIN_SUPERVISION="${ROBOTWIN_EVENT_MIN_SUPERVISION:-500}"
+export ROBOTWIN_EVENT_MAX_LAMBDA="${ROBOTWIN_EVENT_MAX_LAMBDA:-0.25}"
+export ROBOTWIN_EVENT_WARMUP_STEPS="${ROBOTWIN_EVENT_WARMUP_STEPS:-10}"
+export ROBOTWIN_EVENT_RAMP_STEPS="${ROBOTWIN_EVENT_RAMP_STEPS:-50}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_eventvalue_v2}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_eventvalue_v2}"
 
@@ -40,9 +51,9 @@ source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   --config-path config --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
   runner.max_epochs="${ROBOTWIN_MAX_EPOCHS}" runner.logger.log_path="${ROBOTWIN_LOG_PATH}" \
-  runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" runner.val_check_interval=25 runner.save_interval=25 \
+  runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" runner.val_check_interval="${ROBOTWIN_VAL_INTERVAL}" runner.save_interval="${ROBOTWIN_SAVE_INTERVAL}" \
   env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" env.eval.total_num_envs="${ROBOTWIN_EVAL_ENVS}" \
-  env.train.rollout_epoch=4 env.eval.rollout_epoch=1 env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
+  env.train.rollout_epoch=4 env.eval.rollout_epoch="${ROBOTWIN_EVAL_ROLLOUT_EPOCHS}" env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   env.train.video_cfg.save_video=false env.eval.video_cfg.save_video=false \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   +rollout.unnorm_key=adjust_bottle +rollout.collect_transitions=true \
@@ -51,7 +62,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   +algorithm.event_value_source=learned_sidecar +algorithm.event_boundary_threshold=0.5 \
   +algorithm.event_sidecar.observer_checkpoint="${ROBOTWIN_EVENT_OBSERVER_CKPT}" +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
   +algorithm.event_sidecar.resume_sidecar_path="${ROBOTWIN_EVENT_SIDECAR_RESUME}" +algorithm.event_sidecar.value_lr=1.0e-4 +algorithm.event_sidecar.target_ema_decay=0.995 +algorithm.event_sidecar.proprio_time_delta=5.0 \
-  +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 +algorithm.event_branch.horizon=10 +algorithm.event_branch.min_supervision=500 +algorithm.event_branch.influence_lr=1.0e-4 \
-  +algorithm.event_credit.granularity=chunk +algorithm.event_credit.min_supervision_for_actor=500 +algorithm.event_credit.max_lambda=0.25 +algorithm.event_credit.warmup_optimizer_steps=10 +algorithm.event_credit.ramp_optimizer_steps=50 +algorithm.event_credit.influence_beta=0.02 +algorithm.event_credit.influence_clip=3.0 \
+  +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 +algorithm.event_branch.horizon=10 +algorithm.event_branch.min_supervision="${ROBOTWIN_EVENT_MIN_SUPERVISION}" +algorithm.event_branch.influence_lr=1.0e-4 \
+  +algorithm.event_credit.granularity=chunk +algorithm.event_credit.min_supervision_for_actor="${ROBOTWIN_EVENT_MIN_SUPERVISION}" +algorithm.event_credit.max_lambda="${ROBOTWIN_EVENT_MAX_LAMBDA}" +algorithm.event_credit.warmup_optimizer_steps="${ROBOTWIN_EVENT_WARMUP_STEPS}" +algorithm.event_credit.ramp_optimizer_steps="${ROBOTWIN_EVENT_RAMP_STEPS}" +algorithm.event_credit.influence_beta=0.02 +algorithm.event_credit.influence_clip=3.0 \
   actor.optim.lr=2.0e-6 actor.optim.critic_warmup_steps=10 actor.model.openpi.noise_method=flow_sde +actor.model.openpi.joint_logprob=false actor.model.openpi.value_after_vlm=false \
   actor.global_batch_size="${ROBOTWIN_GLOBAL_BATCH}" actor.micro_batch_size="${ROBOTWIN_MICRO_BATCH}"
