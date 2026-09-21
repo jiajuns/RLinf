@@ -25,9 +25,13 @@ export ROBOTWIN_ASSETS_PATH="${ROBOTWIN_ASSETS_PATH:-/data/user/leviccdong/EKSF/
 export ROBOTWIN_PI05_MODEL="${ROBOTWIN_PI05_MODEL:-/data/user/leviccdong/EKSF/models/RLinf-Pi05-RoboTwin-SFT-adjust_bottle}"
 export ROBOTWIN_EVENT_OBSERVER_CKPT="${ROBOTWIN_EVENT_OBSERVER_CKPT:?set Event Observer best.pt}"
 export ROBOTWIN_EVENT_RGB_STUDENT_CKPT="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT:?set RGB student best.pt}"
+# Optional prior branch collection.  Resuming is required when collecting the
+# calibrated 500+ matched states in multiple four-GPU jobs.
+export ROBOTWIN_EVENT_SIDECAR_RESUME="${ROBOTWIN_EVENT_SIDECAR_RESUME:-}"
 export ROBOT_PLATFORM=ALOHA
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
 # Four-GPU equivalent of the upstream eight-GPU recipe: retain the same
 # per-GPU rollout and micro-batch load while halving global envs/batch.
@@ -35,11 +39,17 @@ export ROBOTWIN_BRANCH_COLLECT_EPOCHS="${ROBOTWIN_BRANCH_COLLECT_EPOCHS:-4}"
 export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-128}"
 export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-1024}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-32}"
+export ROBOTWIN_BRANCH_SAVE_INTERVAL="${ROBOTWIN_BRANCH_SAVE_INTERVAL:-4}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_event_branches_v2}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_branch_collect_v2}"
 
 cd "${ROBOTWIN_PATH}"
 source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
+
+sidecar_resume_args=()
+if [[ -n "${ROBOTWIN_EVENT_SIDECAR_RESUME}" ]]; then
+  sidecar_resume_args=("+algorithm.event_sidecar.resume_sidecar_path=${ROBOTWIN_EVENT_SIDECAR_RESUME}")
+fi
 
 # This phase is collection/pretraining, not policy evaluation.  Disable eval
 # while retaining a final resumable sidecar checkpoint at epoch four.
@@ -47,7 +57,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   --config-path config --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
   runner.max_epochs="${ROBOTWIN_BRANCH_COLLECT_EPOCHS}" \
   runner.logger.log_path="${ROBOTWIN_LOG_PATH}" runner.logger.experiment_name="${ROBOTWIN_EXPERIMENT_NAME}" \
-  runner.val_check_interval=-1 runner.save_interval=4 \
+  runner.val_check_interval=-1 runner.save_interval="${ROBOTWIN_BRANCH_SAVE_INTERVAL}" \
   env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" env.train.rollout_epoch=4 env.eval.total_num_envs=128 env.eval.rollout_epoch=1 \
   env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   env.train.video_cfg.save_video=false env.eval.video_cfg.save_video=false \
@@ -58,6 +68,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   +algorithm.event_value_source=learned_sidecar +algorithm.event_boundary_threshold=0.5 \
   +algorithm.event_sidecar.observer_checkpoint="${ROBOTWIN_EVENT_OBSERVER_CKPT}" \
   +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
+  "${sidecar_resume_args[@]}" \
   +algorithm.event_sidecar.value_lr=1.0e-4 +algorithm.event_sidecar.target_ema_decay=0.995 \
   +algorithm.event_sidecar.proprio_time_delta=5.0 \
   +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 \
