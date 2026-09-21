@@ -286,10 +286,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         event_ids = sidecar_rollout.event_ids
         if event_ids.ndim != 3:
-            raise RuntimeError("Event diagnostics expect event IDs shaped [batch,chunks,action_chunk]")
-        # [B,C,K] -> [C,B,K], matching branch returns; token zero identifies
-        # the event for a chunk-level controlled intervention.
-        event_ids = event_ids[..., 0].transpose(0, 1)
+            raise RuntimeError("Event diagnostics expect event IDs shaped [chunks,batch,action_chunk]")
+        # ``infer_event_sidecar_rollout`` already returns [C,B,K], matching
+        # the branch-return layout.  Token zero identifies the event for a
+        # chunk-level controlled intervention.  Do not transpose here: an
+        # earlier diagnostic-only implementation incorrectly assumed a
+        # batch-major layout, which only surfaced when C != B.
+        event_ids = event_ids[..., 0]
         if event_ids.shape != branch_returns.shape[:2]:
             raise RuntimeError("event IDs are not aligned to diagnostic branches")
 
