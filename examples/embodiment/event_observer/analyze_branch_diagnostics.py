@@ -36,7 +36,7 @@ def _summary(values: np.ndarray) -> dict[str, float | int]:
 
 def _pairwise_and_tau(true_scores: np.ndarray, predicted_scores: np.ndarray, tie_eps: float) -> dict[str, float | int | None]:
     """Tie-aware candidate ordering metrics, calculated state by state."""
-    concordant = discordant = true_ties = predicted_ties = valid_pairs = 0
+    concordant = discordant = true_ties = predicted_ties = eligible_pairs = 0
     for truth, prediction in zip(true_scores, predicted_scores, strict=True):
         for left in range(truth.size):
             for right in range(left + 1, truth.size):
@@ -44,18 +44,21 @@ def _pairwise_and_tau(true_scores: np.ndarray, predicted_scores: np.ndarray, tie
                 pred_delta = float(prediction[left] - prediction[right])
                 true_sign = 0 if abs(true_delta) <= tie_eps else int(np.sign(true_delta))
                 pred_sign = 0 if abs(pred_delta) <= tie_eps else int(np.sign(pred_delta))
-                if true_sign == 0 and pred_sign == 0:
-                    continue
                 if true_sign == 0:
-                    true_ties += 1
-                elif pred_sign == 0:
+                    # Near-identical true returns do not define a useful
+                    # ordering target.  They are excluded from pairwise
+                    # accuracy but still count as an x-tie in tau-b when the
+                    # prediction tries to order them.
+                    if pred_sign != 0:
+                        true_ties += 1
+                    continue
+                eligible_pairs += 1
+                if pred_sign == 0:
                     predicted_ties += 1
                 elif true_sign == pred_sign:
                     concordant += 1
-                    valid_pairs += 1
                 else:
                     discordant += 1
-                    valid_pairs += 1
     denominator = np.sqrt(
         (concordant + discordant + true_ties)
         * (concordant + discordant + predicted_ties)
@@ -63,9 +66,9 @@ def _pairwise_and_tau(true_scores: np.ndarray, predicted_scores: np.ndarray, tie
     return {
         "tie_eps": tie_eps,
         "tie_aware_pairwise_accuracy": (
-            float(concordant / valid_pairs) if valid_pairs else None
+            float(concordant / eligible_pairs) if eligible_pairs else None
         ),
-        "ordered_pairs": int(valid_pairs),
+        "ordered_pairs": int(eligible_pairs),
         "concordant": int(concordant),
         "discordant": int(discordant),
         "true_ties": int(true_ties),
