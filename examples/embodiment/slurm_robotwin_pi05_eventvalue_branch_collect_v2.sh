@@ -36,7 +36,9 @@ export ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY="${ROBOTWIN_EVENT_DIAGNOSTIC_RECORD
 export ROBOT_PLATFORM=ALOHA
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
-export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
+# Multi-GPU RLinf broadcasts CUDA tensors through IPC.  PyTorch does not
+# support that IPC path with expandable segments enabled on the HPC kernel.
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:False}"
 
 # Four-GPU equivalent of the upstream eight-GPU recipe: retain the same
 # per-GPU rollout and micro-batch load while halving global envs/batch.

@@ -27,7 +27,9 @@ export ROBOTWIN_EVENT_SIDECAR_RESUME="${ROBOTWIN_EVENT_SIDECAR_RESUME:?set branc
 export ROBOT_PLATFORM=ALOHA
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
-export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
+# The multi-GPU actor/rollout placement transfers CUDA tensors via IPC; keep
+# this disabled for compatibility with the cluster kernel.
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:False}"
 export ROBOTWIN_MAX_EPOCHS="${ROBOTWIN_MAX_EPOCHS:-1000}"
 export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-128}"
 # Keep the official 128 fixed-seed evaluation episodes, but evaluate them in
