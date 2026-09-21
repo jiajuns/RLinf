@@ -31,9 +31,13 @@ export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
-export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-16}"
-export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-128}"
-export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-8}"
+# RTX 6000 Ada has ample VRAM, but this host has only ~63 GB system RAM.
+# Four RoboTwin environments keep the Ray actor/rollout/env total below its
+# 95% host-memory safety threshold; this is a capacity smoke, not a formal
+# throughput setting.
+export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-4}"
+export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-32}"
+export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-4}"
 export ROBOTWIN_BRANCH_COLLECT_EPOCHS="${ROBOTWIN_BRANCH_COLLECT_EPOCHS:-1}"
 
 mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}" "${RLINF_RAY_TMPDIR}"
