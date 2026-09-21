@@ -798,26 +798,28 @@ ManiSkill 的 event-oracle 路径可能更容易先做机制 ladder，但若 Rob
 
 ### 11A.6 本次已提交的审计作业
 
-为避免再用 `influence_loss≈0.0032` 猜测标签质量，已提交 HPC 作业：
+为避免再用 `influence_loss≈0.0032` 猜测标签质量，最初提交的 4-GPU 作业 `641246` 因账户配额排队且在**未启动、未消耗算力**状态下取消；现以更快的 2-GPU 审计替代：
 
 ```text
-Slurm job:       641246
-name:            robotwin_event_branches_v2
-experiment:      robotwin_adjust_bottle_branch_audit_128_frozen
-output root:     /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128
-raw diagnostics: /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128/raw
-configuration:   frozen SFT actor, K=4, H=10, 2 collection epochs,
-                 Event Value LR=0, I_ξ record_only=true, resume existing sidecar
+Slurm job:       641305
+name:            robotwin_branch_audit_2gpu
+experiment:      robotwin_adjust_bottle_branch_audit_128_frozen_2gpu
+output root:     /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128_2gpu
+raw diagnostics: /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128_2gpu/raw
+resources:       2 GPU, 24 CPU, 240 GB; component placement 0-1
+configuration:   frozen SFT actor, K=4, H=10, 2 collection epochs, 64 env,
+                 global batch 512, Event Value LR=0, I_ξ record_only=true,
+                 resume existing sidecar
 ```
 
-提交时状态为 `PENDING (Priority)`；它尚未产生任何结果，不得先报告“128 个 state 有/无 signal”。作业完成后运行：
+提交后的当前状态为 `PENDING (QOSMaxGRESPerUser)`；账户已有 14 张 GPU 在运行，且较早的 4-GPU CALVIN 作业也在等待，所以仍未产生任何结果，不得先报告“128 个 state 有/无 signal”。作业完成后运行：
 
 ```bash
 source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 python /data/user/leviccdong/EKSF/code/RLinf-piRL/examples/embodiment/event_observer/analyze_branch_diagnostics.py \
-  /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128/raw \
-  --output-json /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128/report.json \
-  --output-markdown /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128/report.md
+  /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128_2gpu/raw \
+  --output-json /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128_2gpu/report.json \
+  --output-markdown /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128_2gpu/report.md
 ```
 
 提交前本地与 HPC 均已通过 `py_compile`（schema、worker、RoboTwin env、分析器）以及 Slurm 脚本 `bash -n`；分析器还用合成的 2-state / 4-candidate NPZ 验证了所有必需字段和统计输出。该检查不等同于 GPU/RoboTwin 端到端通过；端到端是否成功以 `641246` 日志和真实 NPZ 为准。
