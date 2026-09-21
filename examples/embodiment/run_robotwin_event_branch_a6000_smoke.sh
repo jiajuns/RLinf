@@ -7,13 +7,14 @@
 set -euo pipefail
 
 export A6000_ROOT="${A6000_ROOT:-/home/chefmate/Data/pirl_a6000_run}"
-export REPO_PATH="${A6000_ROOT}/code/RLinf-piRL"
-export ROBOTWIN_PATH="${A6000_ROOT}/runtime/RoboTwin-RLinf_support"
-export ROBOTWIN_ASSETS_PATH="${A6000_ROOT}/runtime/etsf_stage0/RoboTwin_v14_dual_gpu_20260831"
-export ROBOTWIN_PI05_MODEL="${A6000_ROOT}/models/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
-export ROBOTWIN_EVENT_OBSERVER_CKPT="${A6000_ROOT}/outputs/robotwin_adjust_bottle_event_pretrain_v1_200plus/best.pt"
-export ROBOTWIN_EVENT_RGB_STUDENT_CKPT="${A6000_ROOT}/outputs/robotwin_adjust_bottle_rgb_student_v1_200plus/best.pt"
-export ROBOTWIN_EVENT_SIDECAR_RESUME="${A6000_ROOT}/outputs/robotwin_event_branches_v2_4gpu_equivalent_debug/robotwin_adjust_bottle_branch_collect_v2_4gpu_equivalent_debug/checkpoints/global_step_2/actor/eventvalue_sidecars.pt"
+export REPO_PATH="${A6000_ROOT}/RLinf-piRL"
+export ROBOTWIN_PATH="${A6000_ROOT}/RoboTwin-RLinf_support"
+export ROBOTWIN_ASSETS_PATH="${A6000_ROOT}/RoboTwin_v14_dual_gpu_20260831"
+export ROBOTWIN_PI05_MODEL="${A6000_ROOT}/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
+export ROBOTWIN_EVENT_OBSERVER_CKPT="${A6000_ROOT}/robotwin_adjust_bottle_event_pretrain_v1_200plus/best.pt"
+export ROBOTWIN_EVENT_RGB_STUDENT_CKPT="${A6000_ROOT}/robotwin_adjust_bottle_rgb_student_v1_200plus/best.pt"
+# rsync receives this source file at A6000_ROOT/eventvalue_sidecars.pt.
+export ROBOTWIN_EVENT_SIDECAR_RESUME="${A6000_ROOT}/eventvalue_sidecars.pt"
 export ROBOTWIN_EVENT_DIAGNOSTIC_DIR="${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smoke/raw"
 export ROBOTWIN_LOG_PATH="${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smoke"
 
