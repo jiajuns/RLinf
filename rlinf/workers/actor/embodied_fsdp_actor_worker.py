@@ -313,6 +313,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             f"branch_diag_rank{self._rank}_opt{self.optimizer_steps}_"
             f"seen{self._event_branch_supervision_count}.npz"
         )
+        # ``record_only`` collection is commonly restarted from the same
+        # frozen sidecar, so rank/optimizer/count alone are not unique across
+        # independent invocations.  Preserve every collection rather than
+        # silently overwriting an earlier held-out diagnostic batch.
+        if path.exists():
+            stem, suffix = path.stem, path.suffix
+            retry = 1
+            while path.exists():
+                path = output / f"{stem}_retry{retry}{suffix}"
+                retry += 1
         np.savez_compressed(
             path,
             branch_returns=branch_returns[selected].detach().float().cpu().numpy(),
