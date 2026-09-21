@@ -796,6 +796,32 @@ Y_k=R_{t:t+H}^{(k)}+\gamma^H\bar V_E(z_{t+H}^{E,(k)}),\qquad k\in\{1,\ldots,K\}.
 
 ManiSkill 的 event-oracle 路径可能更容易先做机制 ladder，但若 RoboTwin 是主实验，必须补 RoboTwin adapter。Oracle 仅用于诊断、监督和评估；部署版本仍使用 RGB/proprio Observer。
 
+### 11A.6 本次已提交的审计作业
+
+为避免再用 `influence_loss≈0.0032` 猜测标签质量，已提交 HPC 作业：
+
+```text
+Slurm job:       641246
+name:            robotwin_event_branches_v2
+experiment:      robotwin_adjust_bottle_branch_audit_128_frozen
+output root:     /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128
+raw diagnostics: /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128/raw
+configuration:   frozen SFT actor, K=4, H=10, 2 collection epochs,
+                 Event Value LR=0, I_ξ record_only=true, resume existing sidecar
+```
+
+提交时状态为 `PENDING (Priority)`；它尚未产生任何结果，不得先报告“128 个 state 有/无 signal”。作业完成后运行：
+
+```bash
+source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
+python /data/user/leviccdong/EKSF/code/RLinf-piRL/examples/embodiment/event_observer/analyze_branch_diagnostics.py \
+  /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128/raw \
+  --output-json /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128/report.json \
+  --output-markdown /data/user/leviccdong/EKSF/outputs/robotwin_event_branch_diagnostics_128/report.md
+```
+
+提交前本地与 HPC 均已通过 `py_compile`（schema、worker、RoboTwin env、分析器）以及 Slurm 脚本 `bash -n`；分析器还用合成的 2-state / 4-candidate NPZ 验证了所有必需字段和统计输出。该检查不等同于 GPU/RoboTwin 端到端通过；端到端是否成功以 `641246` 日志和真实 NPZ 为准。
+
 ## 12. CALVIN 相关状态与下一步
 
 ### 12.1 已下载 checkpoint
