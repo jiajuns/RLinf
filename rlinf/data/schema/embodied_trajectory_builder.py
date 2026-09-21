@@ -67,6 +67,8 @@ class EmbodiedTrajectoryBuilder:
     branch_rewards: list[torch.Tensor] = field(default_factory=list)
     branch_horizons: list[torch.Tensor] = field(default_factory=list)
     branch_mask: list[torch.Tensor] = field(default_factory=list)
+    branch_actions: list[torch.Tensor] = field(default_factory=list)
+    branch_success: list[torch.Tensor] = field(default_factory=list)
     branch_main_images: list[torch.Tensor] = field(default_factory=list)
     branch_wrist_images: list[torch.Tensor] = field(default_factory=list)
     branch_measured_state16: list[torch.Tensor] = field(default_factory=list)
@@ -111,6 +113,8 @@ class EmbodiedTrajectoryBuilder:
             ("branch_rewards", self.branch_rewards),
             ("branch_horizons", self.branch_horizons),
             ("branch_mask", self.branch_mask),
+            ("branch_actions", self.branch_actions),
+            ("branch_success", self.branch_success),
             ("branch_main_images", self.branch_main_images),
             ("branch_wrist_images", self.branch_wrist_images),
             ("branch_measured_state16", self.branch_measured_state16),
@@ -203,6 +207,8 @@ class EmbodiedTrajectoryBuilder:
         self.branch_rewards.clear()
         self.branch_horizons.clear()
         self.branch_mask.clear()
+        self.branch_actions.clear()
+        self.branch_success.clear()
         self.branch_main_images.clear()
         self.branch_wrist_images.clear()
         self.branch_measured_state16.clear()
@@ -252,6 +258,8 @@ class EmbodiedTrajectoryBuilder:
             ("branch_rewards", self.branch_rewards),
             ("branch_horizons", self.branch_horizons),
             ("branch_mask", self.branch_mask),
+            ("branch_actions", self.branch_actions),
+            ("branch_success", self.branch_success),
             ("branch_main_images", self.branch_main_images),
             ("branch_wrist_images", self.branch_wrist_images),
             ("branch_measured_state16", self.branch_measured_state16),

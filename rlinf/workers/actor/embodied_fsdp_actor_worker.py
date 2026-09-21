@@ -256,6 +256,72 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             return 0.0
         return maximum * min(1.0, (self.optimizer_steps - warmup) / max(ramp, 1))
 
+    def _write_event_branch_diagnostics(
+        self,
+        *,
+        sidecar_rollout,
+        branch_returns: torch.Tensor,
+        predicted_scores: torch.Tensor,
+        branch_mask: torch.Tensor,
+    ) -> None:
+        """Persist raw matched-state branch diagnostics for offline auditing.
+
+        The old sidecar checkpoints intentionally contain only model state and
+        aggregate counts.  That is insufficient for testing whether a small
+        MSE is meaningful: we need the four true returns and four predicted
+        scores *per state*.  One compressed file per FSDP rank/update avoids
+        cross-rank writes while keeping the artifact compact (no RGB tensors).
+        """
+        cfg = self.cfg.algorithm.get("event_diagnostics", {})
+        output_dir = cfg.get("output_dir", None)
+        if not output_dir:
+            return
+        if branch_returns.shape != predicted_scores.shape:
+            raise RuntimeError("diagnostic prediction and branch-return shapes must match")
+        if branch_mask.shape != branch_returns.shape[:2]:
+            raise RuntimeError("diagnostic branch mask is not aligned to branch returns")
+        selected = branch_mask.bool()
+        if not bool(selected.any()):
+            return
+
+        event_ids = sidecar_rollout.event_ids
+        if event_ids.ndim != 3:
+            raise RuntimeError("Event diagnostics expect event IDs shaped [batch,chunks,action_chunk]")
+        # [B,C,K] -> [C,B,K], matching branch returns; token zero identifies
+        # the event for a chunk-level controlled intervention.
+        event_ids = event_ids[..., 0].transpose(0, 1)
+        if event_ids.shape != branch_returns.shape[:2]:
+            raise RuntimeError("event IDs are not aligned to diagnostic branches")
+
+        branch_success = self.rollout_batch.get("branch_success")
+        success_available = branch_success is not None
+        if branch_success is None:
+            branch_success = torch.zeros_like(branch_returns, dtype=torch.bool)
+        else:
+            branch_success = branch_success.to(branch_returns.device).bool()
+            if branch_success.shape != branch_returns.shape:
+                raise RuntimeError("branch success flags are not aligned to branch returns")
+
+        output = Path(str(output_dir))
+        output.mkdir(parents=True, exist_ok=True)
+        # Include the cumulative real-label count and FSDP rank to make files
+        # unique even after Slurm resume/requeue.
+        path = output / (
+            f"branch_diag_rank{self._rank}_opt{self.optimizer_steps}_"
+            f"seen{self._event_branch_supervision_count}.npz"
+        )
+        np.savez_compressed(
+            path,
+            branch_returns=branch_returns[selected].detach().float().cpu().numpy(),
+            predicted_scores=predicted_scores[selected].detach().float().cpu().numpy(),
+            event_ids=event_ids[selected].detach().cpu().numpy(),
+            branch_success=branch_success[selected].detach().cpu().numpy(),
+            success_available=np.asarray(success_available, dtype=np.bool_),
+            gamma=np.asarray(float(self.cfg.algorithm.get("gamma", 1.0)), dtype=np.float32),
+            actor_rank=np.asarray(self._rank, dtype=np.int64),
+            optimizer_step=np.asarray(self.optimizer_steps, dtype=np.int64),
+        )
+
     def _update_influence_from_branches(
         self,
         sidecar_rollout,
@@ -331,12 +397,48 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 target = branch_returns[..., 0] - branch_returns.mean(dim=-1)
                 direct_prediction = chunk_prediction if granularity == "chunk" else prediction[..., 0]
                 influence_loss = EventInfluenceModel.loss(direct_prediction, target, mask)
-                self._event_influence_optimizer.zero_grad(set_to_none=True)
-                influence_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self._event_influence_model.parameters(), 1.0)
-                self._event_influence_optimizer.step()
-                self._event_branch_supervision_count += int(mask.sum().item())
-                self._event_branch_outcome_count += int(mask.sum().item() * branch_returns.shape[-1])
+                branch_actions = self.rollout_batch.get("branch_actions")
+                if branch_actions is not None and granularity == "chunk":
+                    # Every candidate is scored with the same state/event
+                    # representation and its own sampled Flow-SDE chunk.  The
+                    # online loss still uses candidate zero only; this complete
+                    # score matrix exists for offline ranking diagnostics.
+                    candidate_actions = branch_actions.to(device)
+                    expected_shape = (chunks, batch, branch_returns.shape[-1], action_chunk)
+                    if candidate_actions.shape[:4] != expected_shape:
+                        raise RuntimeError(
+                            "branch action candidates are not aligned to Event diagnostics: "
+                            f"got {candidate_actions.shape}, expected prefix {expected_shape}"
+                        )
+                    candidate_actions = candidate_actions.permute(1, 0, 2, 3, 4).flatten(start_dim=-2)
+                    candidate_representations = representations.unsqueeze(2).expand(
+                        -1, -1, candidate_actions.shape[2], -1
+                    )
+                    with torch.no_grad():
+                        candidate_scores = self._event_influence_model(
+                            candidate_representations, candidate_actions
+                        ).permute(1, 0, 2)
+                    self._write_event_branch_diagnostics(
+                        sidecar_rollout=sidecar_rollout,
+                        branch_returns=branch_returns,
+                        predicted_scores=candidate_scores,
+                        branch_mask=mask,
+                    )
+                elif self.cfg.algorithm.get("event_diagnostics", {}).get("output_dir", None):
+                    raise RuntimeError(
+                        "Event diagnostics require chunk granularity and transported branch actions"
+                    )
+
+                record_only = bool(
+                    self.cfg.algorithm.get("event_diagnostics", {}).get("record_only", False)
+                )
+                if not record_only:
+                    self._event_influence_optimizer.zero_grad(set_to_none=True)
+                    influence_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self._event_influence_model.parameters(), 1.0)
+                    self._event_influence_optimizer.step()
+                    self._event_branch_supervision_count += int(mask.sum().item())
+                    self._event_branch_outcome_count += int(mask.sum().item() * branch_returns.shape[-1])
 
         minimum = int(self.cfg.algorithm.get("event_branch", {}).get("min_supervision", 1))
         if self._event_branch_supervision_count < minimum:

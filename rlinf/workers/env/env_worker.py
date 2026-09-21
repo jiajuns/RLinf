@@ -522,6 +522,10 @@ class EnvWorker(Worker):
                 self.cfg.algorithm.get("event_branch", {}).get("horizon", 10)
             )
             branch_payload = branch_step(branch_actions, horizon=branch_horizon)
+            # Preserve the exact Flow-SDE candidates alongside their outcomes
+            # for offline influence-ranking diagnostics.  These stay out of
+            # ordinary PPO unless Event diagnostics are explicitly enabled.
+            branch_payload["branch_actions"] = branch_actions.detach().cpu()
 
         obs_list, chunk_rewards, chunk_terminations, chunk_truncations, infos_list = (
             self.env_list[stage_id].chunk_step(chunk_actions)
@@ -545,6 +549,18 @@ class EnvWorker(Worker):
                     (branch_batch_size, branch_candidates), dtype=torch.long
                 ),
                 "branch_mask": torch.zeros(branch_batch_size, dtype=torch.bool),
+                "branch_actions": torch.zeros(
+                    (
+                        branch_batch_size,
+                        branch_candidates,
+                        self.model_cfg.num_action_chunks,
+                        self.model_cfg.action_dim,
+                    ),
+                    dtype=exec_actions.dtype,
+                ),
+                "branch_success": torch.zeros(
+                    (branch_batch_size, branch_candidates), dtype=torch.bool
+                ),
                 "branch_main_images": torch.zeros(
                     (branch_batch_size, branch_candidates, *extracted_obs["main_images"].shape[1:]),
                     dtype=extracted_obs["main_images"].dtype,
@@ -1250,6 +1266,8 @@ class EnvWorker(Worker):
                         branch_rewards=env_output.branch_rewards,
                         branch_horizons=env_output.branch_horizons,
                         branch_mask=env_output.branch_mask,
+                        branch_actions=env_output.branch_actions,
+                        branch_success=env_output.branch_success,
                         branch_main_images=env_output.branch_main_images,
                         branch_wrist_images=env_output.branch_wrist_images,
                         branch_measured_state16=env_output.branch_measured_state16,
@@ -1411,6 +1429,8 @@ class EnvWorker(Worker):
                     branch_rewards=env_output.branch_rewards,
                     branch_horizons=env_output.branch_horizons,
                     branch_mask=env_output.branch_mask,
+                    branch_actions=env_output.branch_actions,
+                    branch_success=env_output.branch_success,
                     branch_main_images=env_output.branch_main_images,
                     branch_wrist_images=env_output.branch_wrist_images,
                     branch_measured_state16=env_output.branch_measured_state16,

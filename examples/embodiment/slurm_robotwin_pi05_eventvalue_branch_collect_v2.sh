@@ -28,6 +28,11 @@ export ROBOTWIN_EVENT_RGB_STUDENT_CKPT="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT:?set R
 # Optional prior branch collection.  Resuming is required when collecting the
 # calibrated 500+ matched states in multiple four-GPU jobs.
 export ROBOTWIN_EVENT_SIDECAR_RESUME="${ROBOTWIN_EVENT_SIDECAR_RESUME:-}"
+# If set, persist raw [state,candidate] returns/scores for the influence
+# identifiability audit.  This is intentionally opt-in because it is not part
+# of ordinary PPO traffic.
+export ROBOTWIN_EVENT_DIAGNOSTIC_DIR="${ROBOTWIN_EVENT_DIAGNOSTIC_DIR:-}"
+export ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY="${ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY:-false}"
 export ROBOT_PLATFORM=ALOHA
 export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
 export HYDRA_FULL_ERROR=1
@@ -40,6 +45,7 @@ export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-128}"
 export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-1024}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-32}"
 export ROBOTWIN_BRANCH_SAVE_INTERVAL="${ROBOTWIN_BRANCH_SAVE_INTERVAL:-4}"
+export ROBOTWIN_EVENT_VALUE_LR="${ROBOTWIN_EVENT_VALUE_LR:-1.0e-4}"
 export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-/data/user/leviccdong/EKSF/outputs/robotwin_event_branches_v2}"
 export ROBOTWIN_EXPERIMENT_NAME="${ROBOTWIN_EXPERIMENT_NAME:-robotwin_adjust_bottle_branch_collect_v2}"
 
@@ -49,6 +55,13 @@ source /share/anaconda3/bin/activate /data/user/leviccdong/EKSF/env_pirl_pi05
 sidecar_resume_args=()
 if [[ -n "${ROBOTWIN_EVENT_SIDECAR_RESUME}" ]]; then
   sidecar_resume_args=("+algorithm.event_sidecar.resume_sidecar_path=${ROBOTWIN_EVENT_SIDECAR_RESUME}")
+fi
+diagnostic_args=()
+if [[ -n "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" ]]; then
+  diagnostic_args=(
+    "+algorithm.event_diagnostics.output_dir=${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}"
+    "+algorithm.event_diagnostics.record_only=${ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY}"
+  )
 fi
 
 # This phase is collection/pretraining, not policy evaluation.  Disable eval
@@ -69,14 +82,15 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   +algorithm.event_sidecar.observer_checkpoint="${ROBOTWIN_EVENT_OBSERVER_CKPT}" \
   +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
   "${sidecar_resume_args[@]}" \
-  +algorithm.event_sidecar.value_lr=1.0e-4 +algorithm.event_sidecar.target_ema_decay=0.995 \
-  +algorithm.event_sidecar.proprio_time_delta=5.0 \
+  +algorithm.event_sidecar.target_ema_decay=0.995 \
+  +algorithm.event_sidecar.proprio_time_delta=5.0 +algorithm.event_sidecar.value_lr="${ROBOTWIN_EVENT_VALUE_LR}" \
   +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 \
   +algorithm.event_branch.horizon=10 +algorithm.event_branch.min_supervision=500 \
   +algorithm.event_branch.influence_lr=1.0e-4 \
   +algorithm.event_credit.granularity=chunk +algorithm.event_credit.max_lambda=0.0 \
   +algorithm.event_credit.min_supervision_for_actor=999999 \
   +algorithm.event_credit.influence_beta=0.02 +algorithm.event_credit.influence_clip=3.0 \
+  "${diagnostic_args[@]}" \
   actor.optim.lr=0.0 actor.optim.value_lr=0.0 actor.model.openpi.noise_method=flow_sde \
   +actor.model.openpi.joint_logprob=false actor.model.openpi.value_after_vlm=false \
   actor.global_batch_size="${ROBOTWIN_GLOBAL_BATCH}" actor.micro_batch_size="${ROBOTWIN_MICRO_BATCH}"

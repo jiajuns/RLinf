@@ -63,6 +63,11 @@ class EnvOutput:
     branch_rewards: Optional[torch.Tensor] = None  # [B, candidates]
     branch_horizons: Optional[torch.Tensor] = None  # [B, candidates]
     branch_mask: Optional[torch.Tensor] = None  # [B]
+    # Flow-SDE action chunks that generated the controlled branch outcomes.
+    # They are transported only when the optional Event diagnostics path is
+    # enabled; base PPO does not consume them.
+    branch_actions: Optional[torch.Tensor] = None  # [B, candidates, action_chunk, action_dim]
+    branch_success: Optional[torch.Tensor] = None  # [B, candidates]
     branch_main_images: Optional[torch.Tensor] = None  # [B, candidates, H, W, 3]
     branch_wrist_images: Optional[torch.Tensor] = None  # [B, candidates, (W), H, W, 3]
     branch_measured_state16: Optional[torch.Tensor] = None  # [B, candidates, 16]
@@ -122,6 +127,8 @@ class EnvOutput:
             "branch_rewards",
             "branch_horizons",
             "branch_mask",
+            "branch_actions",
+            "branch_success",
             "branch_main_images",
             "branch_wrist_images",
             "branch_measured_state16",
@@ -276,6 +283,12 @@ class EnvOutput:
             branch_mask=_merge_optional_tensor_field(
                 "branch_mask", allow_partial_none=True, fill_value=False
             ),
+            branch_actions=_merge_optional_tensor_field(
+                "branch_actions", allow_partial_none=True, fill_value=0.0
+            ),
+            branch_success=_merge_optional_tensor_field(
+                "branch_success", allow_partial_none=True, fill_value=False
+            ),
             branch_main_images=_merge_optional_tensor_field(
                 "branch_main_images", allow_partial_none=True, fill_value=0
             ),
@@ -308,6 +321,8 @@ class EnvOutput:
             "branch_rewards": self.branch_rewards,
             "branch_horizons": self.branch_horizons,
             "branch_mask": self.branch_mask,
+            "branch_actions": self.branch_actions,
+            "branch_success": self.branch_success,
             "branch_main_images": self.branch_main_images,
             "branch_wrist_images": self.branch_wrist_images,
             "branch_measured_state16": self.branch_measured_state16,
@@ -433,6 +448,8 @@ class ChunkStepResult:
     branch_rewards: torch.Tensor = None
     branch_horizons: torch.Tensor = None
     branch_mask: torch.Tensor = None
+    branch_actions: torch.Tensor = None
+    branch_success: torch.Tensor = None
     branch_main_images: torch.Tensor = None
     branch_wrist_images: torch.Tensor = None
     branch_measured_state16: torch.Tensor = None
@@ -464,6 +481,8 @@ class ChunkStepResult:
             "branch_rewards",
             "branch_horizons",
             "branch_mask",
+            "branch_actions",
+            "branch_success",
             "branch_main_images",
             "branch_wrist_images",
             "branch_measured_state16",
@@ -499,6 +518,8 @@ class Trajectory:
     branch_rewards: torch.Tensor = None
     branch_horizons: torch.Tensor = None
     branch_mask: torch.Tensor = None
+    branch_actions: torch.Tensor = None
+    branch_success: torch.Tensor = None
     branch_main_images: torch.Tensor = None
     branch_wrist_images: torch.Tensor = None
     branch_measured_state16: torch.Tensor = None

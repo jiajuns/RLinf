@@ -128,14 +128,21 @@ class RoboTwinEnv(gym.Env):
         if branch_actions.shape[0] != self.num_envs or not 1 <= horizon <= branch_actions.shape[2]:
             raise ValueError("branch action batch/horizon is incompatible with RoboTwinEnv")
         snapshot = self.get_state()
-        rewards, main_images, wrist_images, measured_states = [], [], [], []
+        rewards, successes, main_images, wrist_images, measured_states = [], [], [], [], []
         try:
             for candidate_idx in range(branch_actions.shape[1]):
                 self.load_state(snapshot)
-                obs, reward, _terminated, _truncated, _infos = self.step(
+                obs, reward, terminated, _truncated, infos = self.step(
                     branch_actions[:, candidate_idx, :horizon], auto_reset=False
                 )
                 rewards.append(reward.detach().cpu())
+                # Prefer the task's explicit success predicate.  A terminal
+                # transition is retained as a conservative fallback for older
+                # RoboTwin task implementations that omit this field.
+                success = infos.get("success") if isinstance(infos, dict) else None
+                if success is None:
+                    success = terminated
+                successes.append(torch.as_tensor(success, dtype=torch.bool).detach().cpu())
                 main_images.append(obs["main_images"].detach().cpu())
                 wrist = obs.get("wrist_images")
                 if wrist is None:
@@ -154,6 +161,7 @@ class RoboTwinEnv(gym.Env):
                 (self.num_envs, candidates), horizon, dtype=torch.long
             ),
             "branch_mask": torch.ones(self.num_envs, dtype=torch.bool),
+            "branch_success": torch.stack(successes, dim=1),
             "branch_main_images": torch.stack(main_images, dim=1),
             "branch_wrist_images": torch.stack(wrist_images, dim=1),
             "branch_measured_state16": torch.stack(measured_states, dim=1),
