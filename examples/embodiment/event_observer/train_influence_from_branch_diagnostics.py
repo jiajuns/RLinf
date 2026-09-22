@@ -21,6 +21,28 @@ from torch.utils.data import DataLoader, TensorDataset
 from rlinf.algorithms.event_intervention import EventInfluenceModel
 
 
+def _duplicate_action_noise(actions: np.ndarray, outcomes: np.ndarray, *, action_eps: float) -> np.ndarray:
+    """Return a conservative per-state noise floor from repeated candidates.
+
+    Flow sampling can intentionally emit the policy chunk twice (candidate 0
+    and its replay control).  Those pairs are a direct test of the complete
+    clone -> render -> student -> Event-Value label path: the environment
+    reward may agree while the bootstrap does not.  We never use this number
+    as a training target.  It only filters states whose candidate spread is
+    indistinguishable from the measured repeat noise.
+    """
+    noise = np.zeros(len(outcomes), dtype=np.float32)
+    for state, (candidate_actions, candidate_returns) in enumerate(zip(actions, outcomes, strict=True)):
+        repeated = []
+        for left in range(len(candidate_returns)):
+            for right in range(left + 1, len(candidate_returns)):
+                if np.max(np.abs(candidate_actions[left] - candidate_actions[right])) <= action_eps:
+                    repeated.append(abs(float(candidate_returns[left] - candidate_returns[right])))
+        if repeated:
+            noise[state] = max(repeated)
+    return noise
+
+
 def _load_rows(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     representations, actions, returns, groups = [], [], [], []
     paths = sorted(root.glob("branch_diag_rank*_opt*_seen*.npz"))
@@ -133,15 +155,33 @@ def main() -> None:
     parser.add_argument("--validation-fraction", type=float, default=.25)
     parser.add_argument("--tie-eps", type=float, default=1e-4)
     parser.add_argument("--random-trials", type=int, default=100)
+    parser.add_argument("--action-repeat-eps", type=float, default=0.0)
+    parser.add_argument("--min-spread-over-repeat-noise", type=float, default=0.0,
+                        help="Keep states only when range(Y) exceeds this multiple of their repeated-action noise.")
+    parser.add_argument("--min-absolute-spread", type=float, default=0.0)
+    parser.add_argument("--normalized-target-loss", action="store_true",
+                        help="Scale MSE gradients by train target std; model outputs remain in original return units.")
+    parser.add_argument("--weight-decay", type=float, default=1e-2)
+    parser.add_argument("--overfit-all-states", action="store_true",
+                        help="Diagnostic only: train and report on the same frozen branch states; never a generalization result.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     if not 0 < args.validation_fraction < 1 or args.epochs < 1:
         raise ValueError("validation fraction and epochs must be positive")
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     representations, actions, outcomes, groups = _load_rows(args.diagnostics)
+    repeat_noise = _duplicate_action_noise(actions, outcomes, action_eps=args.action_repeat_eps)
+    state_spread = outcomes.max(axis=1) - outcomes.min(axis=1)
+    threshold = np.maximum(args.min_absolute_spread, args.min_spread_over_repeat_noise * repeat_noise)
+    keep = state_spread > threshold
+    if not keep.any():
+        raise ValueError("signal filter removed every branch state")
+    representations, actions, outcomes, groups, repeat_noise, state_spread = (
+        value[keep] for value in (representations, actions, outcomes, groups, repeat_noise, state_spread)
+    )
     targets = outcomes - outcomes.mean(axis=1, keepdims=True)
-    validation = _validation_mask(groups, args.validation_fraction)
-    if not validation.any() or validation.all():
+    validation = np.zeros(len(groups), dtype=bool) if args.overfit_all_states else _validation_mask(groups, args.validation_fraction)
+    if not args.overfit_all_states and (not validation.any() or validation.all()):
         raise RuntimeError("invalid grouped train/validation split")
     payload = torch.load(args.sidecar, map_location="cpu", weights_only=False)
     if payload.get("format") != "eventvalue_rl_sidecars_v2":
@@ -149,7 +189,7 @@ def main() -> None:
     hidden_dim = int(payload["influence_model"]["network.1.weight"].shape[0])
     model = EventInfluenceModel(representations.shape[-1], actions.shape[-1], hidden_dim=hidden_dim)
     model.load_state_dict(payload["influence_model"])
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     train_rep = torch.from_numpy(representations[~validation])
     train_actions = torch.from_numpy(actions[~validation])
     train_targets = torch.from_numpy(targets[~validation])
@@ -160,21 +200,27 @@ def main() -> None:
     val_actions = torch.from_numpy(actions[validation])
     val_targets = torch.from_numpy(targets[validation])
     val_returns = torch.from_numpy(outcomes[validation])
+    target_scale = float(train_targets.std().clamp_min(1e-8)) if args.normalized_target_loss else 1.0
     best = float("inf"); best_state = None; history = []
     for epoch in range(args.epochs):
         model.train()
         for rep, action, target in loader:
-            loss = EventInfluenceModel.loss(model(rep.unsqueeze(1).expand(-1, action.shape[1], -1), action), target)
+            prediction = model(rep.unsqueeze(1).expand(-1, action.shape[1], -1), action)
+            loss = EventInfluenceModel.loss(prediction / target_scale, target / target_scale)
             optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
         model.eval()
         with torch.no_grad():
             train_prediction = model(train_rep.unsqueeze(1).expand(-1, train_actions.shape[1], -1), train_actions)
-            prediction = model(val_rep.unsqueeze(1).expand(-1, val_actions.shape[1], -1), val_actions)
-            value_loss = float(EventInfluenceModel.loss(prediction, val_targets))
+            evaluation_rep = train_rep if args.overfit_all_states else val_rep
+            evaluation_actions = train_actions if args.overfit_all_states else val_actions
+            evaluation_targets = train_targets if args.overfit_all_states else val_targets
+            evaluation_returns = train_returns if args.overfit_all_states else val_returns
+            prediction = model(evaluation_rep.unsqueeze(1).expand(-1, evaluation_actions.shape[1], -1), evaluation_actions)
+            value_loss = float(EventInfluenceModel.loss(prediction / target_scale, evaluation_targets / target_scale))
             train_ranking = _ranking_metrics(train_returns, train_prediction, args.tie_eps)
-            ranking = _ranking_metrics(val_returns, prediction, args.tie_eps)
+            ranking = _ranking_metrics(evaluation_returns, prediction, args.tie_eps)
             random_baseline = _statewise_shuffle_baseline(
-                val_returns, prediction, args.tie_eps, np.random.default_rng(args.seed + epoch), args.random_trials
+                evaluation_returns, prediction, args.tie_eps, np.random.default_rng(args.seed + epoch), args.random_trials
             )
         history.append({"epoch": epoch, "train": train_ranking, "validation": ranking, "validation_random_baseline": random_baseline})
         if value_loss < best:
@@ -189,6 +235,16 @@ def main() -> None:
         "diagnostics": str(args.diagnostics), "states": int(len(outcomes)), "train_states": int((~validation).sum()),
         "validation_states": int(validation.sum()), "best_validation_mse": best,
         "best_epoch": int(np.argmin([row["validation"]["model_mse"] for row in history])),
+        "diagnostic_settings": {
+            "overfit_all_states": args.overfit_all_states, "normalized_target_loss": args.normalized_target_loss,
+            "target_scale": target_scale, "action_repeat_eps": args.action_repeat_eps,
+            "min_spread_over_repeat_noise": args.min_spread_over_repeat_noise,
+            "min_absolute_spread": args.min_absolute_spread,
+        },
+        "signal_audit": {
+            "repeat_noise_median": float(np.median(repeat_noise)), "repeat_noise_p90": float(np.quantile(repeat_noise, .9)),
+            "state_spread_median": float(np.median(state_spread)), "state_spread_p90": float(np.quantile(state_spread, .9)),
+        },
     }
     args.output_sidecar.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, args.output_sidecar)

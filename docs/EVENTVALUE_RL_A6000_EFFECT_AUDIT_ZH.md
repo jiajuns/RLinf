@@ -283,6 +283,56 @@ influence_offline/eventvalue_sidecars.pt
 influence_offline/report.json
 ```
 
+## 8.2 新增诊断：重复动作噪声、小样本拟合与在线前端
+
+### 重复动作标签审计
+
+在同一批 160 个 clone state 中，candidate 0 与 candidate 1 是逐元素完全相同的完整 5-step action chunk。它们的即时环境分支结果一致：reward、实际持续步数、termination 和 truncation 的差异均为零；但 `R + gamma Vbar_E(endpoint)` 仍有差异。该差异完全来自 endpoint Event-Value bootstrap：中位 absolute difference 为 `2.18e-5`、P90 为 `1.30e-4`、最大为 `2.18e-3`。因此这不是物理动作差异，而是 endpoint 渲染/在线前端/Event Value 的非确定性或敏感性；后续 branch label 必须显式报告并超过这一噪声地板，不能仅凭 MSE 判断 Influence。
+
+### 高信号小样本过拟合检查
+
+新增 `--overfit-all-states`、action-repeat noise filter 与 target-scale-normalized loss。筛出 candidate range 大于 `max(3 × repeat-noise, 1e-4)` 的 92 个 state 后，以冻结 representation/action/return 训练 500 epoch（不保留 validation；这是纯可学习性诊断而不是泛化实验）。即使取消 weight decay 并按训练 target 标准差 `1.695e-3` 缩放梯度，结果仍为：
+
+| 指标 | 高信号训练集（92 states） |
+|---|---:|
+| model / zero centered-MSE | `0.931` |
+| tie-aware pairwise accuracy | `0.143` |
+| Kendall-\(\tau_b\) | `0.071` |
+| predicted ties | 318 / 414 eligible pairs |
+| statewise shuffle pairwise accuracy | `0.097` |
+| top-1 regret（model / shuffle） | `6.78e-4` / `1.35e-3` |
+
+模型相对 zero predictor 仅有微弱 MSE 改善、仍把多数候选预测为平局。它略优于 statewise shuffle，但**尚未通过“训练集本身能可靠排序”的门槛**。该结果优先指向 action/target 尺度、action-label 对齐或当前 Influence MSE 目标的可学习性问题；它不证明 branch 标签无效。
+
+### 在线前端端到端检查
+
+新增 `evaluate_adjust_bottle_online_frontend.py`，在与 Observer 原验证相同的 15 条 held-out episode、256 个有效 5-step chunk 上，严格比较同一个冻结 Observer 的两种输入：cache teacher feature 与 `RGB student -> feature`。输入合同一致：`proprio_time_delta=5 control steps`、mount token `2`、右腕 RGB。
+
+| 指标 | cache teacher \(\rightarrow\) Observer | RGB student \(\rightarrow\) Observer |
+|---|---:|---:|
+| boundary F1 | 0.7030 | 0.6951 |
+| boundary F1@±3 | 0.9576 | 0.9512 |
+| progress MAE | 0.1710 | 0.1718 |
+| Event Value MAE | 0.1003 | 0.1090 |
+
+在线路径相对 teacher 有小幅退化（teacher-to-online Value absolute MAE `0.0209`），但不能解释 Influence 在训练集上也难以排序。因此，当前主要排查对象仍是 branch target/Influence 学习，而不是 RGB student。
+
+### 固定 SFT continuation 验证链路
+
+新增 `validate_bootstrap_with_sft_continuation.py`：从真实 live RoboTwin snapshot 执行完整 5-step candidate chunk，计算
+
+\[
+R_{\mathrm{branch}}+\gamma\bar V_E(z_{\mathrm{endpoint}}),
+\]
+
+然后恢复相同 endpoint，由**冻结的** \(\pi_{0.5}\) SFT 连续重规划至终止，计算
+
+\[
+R_{\mathrm{branch}}+\gamma G_{\mathrm{continuation}}.
+\]
+
+首个 smoke state（25 control steps、2 candidate）成功执行和恢复：bootstrap 偏好 candidate 1（`0.942379 > 0.941706`），真实 SFT continuation 则偏好 candidate 0（`0.770043 > 0.762343`），即该单对排序相反。样本量为 1，**不能作为 Value 无效的结论**；它只证明新的直接标签校验已可运行。一个 3 个时间分层 state、3 candidates、每 endpoint 2 次 continuation 的运行正在 A6000 执行，结果产生前继续保持 `lambda=0`。
+
 ## 9. 对当前方法效果的严格结论
 
 截至本报告：
