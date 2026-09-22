@@ -121,6 +121,25 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
     geometric = geometric_raw[indices]
     state_change = state_change_raw[indices]
     dones = np.zeros(len(indices), bool); dones[-1] = True
+    # This cache is consumed as one sample per policy chunk.  Fail at the
+    # producer if a future refactor leaves any supervision field at raw video
+    # rate: accepting it would silently train the Observer on mismatched
+    # feature/label pairs.
+    chunk_fields = {
+        "tracks": tracks,
+        "ee_state16": ee,
+        "posterior": posterior,
+        "state": state,
+        "progress": progress,
+        "geometric": geometric,
+        "state_change": state_change,
+        "boundary": boundary,
+        "rewards": rewards,
+        "dones": dones,
+    }
+    wrong = {name: len(value) for name, value in chunk_fields.items() if len(value) != len(indices)}
+    if wrong:
+        raise RuntimeError(f"chunk cache fields are misaligned: expected {len(indices)}, got {wrong}")
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         output,
