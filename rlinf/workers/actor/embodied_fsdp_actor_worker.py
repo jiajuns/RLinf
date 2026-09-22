@@ -21,7 +21,7 @@ from torch import nn
 import rlinf.algorithms  # noqa: F401
 from rlinf.algorithms.expert import build_expert_model_config
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
-from rlinf.algorithms.event_intervention import EventInfluenceModel
+from rlinf.algorithms.event_intervention import EventInfluenceModel, policy_relative_influence
 from rlinf.algorithms.event_sidecar_distributed import (
     all_reduce_gradients,
     broadcast_module,
@@ -311,6 +311,48 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             raise ValueError("event credit granularity must be 'action' or 'chunk'")
         return action_chunks.permute(1, 0, 2, 3).reshape(batch, chunks * action_chunk, action_dim)
 
+    def _policy_relative_chunk_influence(
+        self,
+        representations: torch.Tensor,
+        actions: torch.Tensor,
+        *,
+        chunks: int,
+        batch: int,
+        action_chunk: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return ``f(z,a)-E_{a'~pi}[f(z,a')]`` on the chunk clock.
+
+        The sidecar is trained with a state-centred objective.  Its raw score
+        is therefore not identifiable across two different states: an
+        arbitrary state-only offset leaves the training objective unchanged.
+        The rollout worker transports non-executed Flow-SDE samples from the
+        *same observation* so PPO can use the only identified quantity.
+        They are model-inference samples, not simulator branches, and are
+        deliberately excluded from interaction accounting.
+        """
+        references = self.rollout_batch.get("influence_reference_actions")
+        if references is None:
+            return torch.zeros((chunks, batch), device=device, dtype=actions.dtype)
+        if references.ndim != 5 or references.shape[:2] != (chunks, batch):
+            raise RuntimeError(
+                "policy-relative Influence references must have shape "
+                "[chunks, batch, candidates, action_chunk, action_dim]"
+            )
+        action_dim = self.cfg.actor.model.action_dim
+        if references.shape[2] < 2 or references.shape[3:] != (action_chunk, action_dim):
+            raise RuntimeError("policy-relative Influence reference chunks have an invalid shape")
+        reference_actions = references.to(device).permute(1, 0, 2, 3, 4).reshape(
+            batch, chunks, references.shape[2], action_chunk * action_dim
+        )
+        relative = policy_relative_influence(
+            self._event_influence_model,
+            representations,
+            actions,
+            reference_actions,
+        )
+        return relative.transpose(0, 1)
+
     def _event_credit_mix_lambda(self) -> float:
         """Return a conservative, branch-gated Event residual coefficient.
 
@@ -333,6 +375,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         maximum = float(cfg.get("max_lambda", 0.0))
         if not 0.0 <= maximum <= 1.0:
             raise ValueError("algorithm.event_credit.max_lambda must be in [0, 1]")
+        if maximum > 0.0:
+            if str(cfg.get("granularity", "action")) != "chunk":
+                raise ValueError("learned policy-relative Influence currently requires chunk granularity")
+            if int(cfg.get("reference_candidates", 0)) < 2:
+                raise ValueError(
+                    "Event credit with a state-centered Influence score requires "
+                    "event_credit.reference_candidates >= 2"
+                )
         warmup = int(cfg.get("warmup_optimizer_steps", 0))
         ramp = int(cfg.get("ramp_optimizer_steps", 1))
         if self.optimizer_steps < warmup:
@@ -480,9 +530,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Train ``I_ξ`` on real branch labels and return PPO influences.
 
-        Only the first action in a selected policy chunk receives a direct
-        same-state label.  The model then amortizes this sparse evidence to all
-        actions in the event.  Before enough real labels exist, exact zeros
+        Branch outcomes supervise a state-centered candidate score.  PPO never
+        consumes that raw score: it consumes the score relative to same-state,
+        non-executed policy samples, which removes the unidentifiable
+        state-common offset.  Before enough real labels exist, exact zeros
         select uniform Event-SMDP credit rather than random causal scores.
         """
         if self._event_influence_model is None or self._event_influence_optimizer is None:
@@ -594,8 +645,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 if branch_actions is not None and granularity == "chunk":
                     # Every candidate is scored with the same state/event
                     # representation and its own sampled Flow-SDE chunk.  The
-                    # online loss still uses candidate zero only; this complete
-                    # score matrix exists for offline ranking diagnostics.
+                    # score matrix trains the same state-centred objective as
+                    # the offline ranking diagnostics.
                     candidate_actions = branch_actions.to(device)
                     expected_shape = (chunks, batch, branch_returns.shape[-1], action_chunk)
                     if candidate_actions.shape[:4] != expected_shape:
@@ -624,7 +675,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         & (valid_count.unsqueeze(-1) >= 2)
                     )
                     if bool(candidate_supervision_mask.any()):
-                        local_loss_sum = (candidate_scores - candidate_target).square().masked_select(
+                        # Do not regress raw scores to centred labels.  The
+                        # objective identifies only candidate differences; a
+                        # per-state score offset is intentionally free.
+                        score_count = candidate_supervision_mask.sum(dim=-1, keepdim=True)
+                        score_mean = (
+                            (candidate_scores * candidate_supervision_mask).sum(dim=-1, keepdim=True)
+                            / score_count.clamp_min(1)
+                        )
+                        candidate_scores_centered = candidate_scores - score_mean
+                        local_loss_sum = (candidate_scores_centered - candidate_target).square().masked_select(
                             candidate_supervision_mask
                         ).sum()
                         local_supervision_count = int(candidate_supervision_mask.sum().item())
@@ -674,8 +734,23 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         minimum = int(self.cfg.algorithm.get("event_branch", {}).get("min_supervision", 1))
         if self._event_branch_supervision_count < minimum:
             allocated = torch.zeros_like(prediction)
+        elif granularity == "chunk":
+            # ``prediction`` carries an arbitrary state-only intercept under
+            # state-centred training and must never be used directly as credit.
+            relative_chunk = self._policy_relative_chunk_influence(
+                representations,
+                actions,
+                chunks=chunks,
+                batch=batch,
+                action_chunk=action_chunk,
+                device=device,
+            )
+            allocated = relative_chunk.unsqueeze(-1).expand(-1, -1, action_chunk).detach()
         else:
-            allocated = prediction.detach()
+            # Action-level branch labels are not identifiable from whole
+            # action chunks.  Keep this legacy path inert until a matching
+            # action-level intervention/reference protocol exists.
+            allocated = torch.zeros_like(prediction)
         return allocated.to(self.rollout_batch["rewards"].device), influence_loss.detach() if influence_loss is not None else None
 
     def _populate_learned_event_sidecar(self) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -1093,6 +1168,34 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             )
         if self.cfg.algorithm.adv_type == "event_smdp_residual":
             rollout_metrics["event/mix_lambda"] = torch.tensor(self._event_credit_mix_lambda())
+
+        # These tensors live on the sidecar's chunk clock.  They have already
+        # served their only purposes (Value/Influence update and advantage
+        # construction) and must not enter RLinf's generic PPO token shuffle:
+        # the actor minibatch is action-token sized while branch/reference
+        # candidates are one record per complete action chunk.  Keeping them
+        # here would both waste memory and make the generic reshape/index path
+        # mix incompatible time axes.
+        for field_name in (
+            "event_ids",
+            "event_values",
+            "intervention_influence",
+            "branch_rewards",
+            "branch_horizons",
+            "branch_requested_steps",
+            "branch_mask",
+            "branch_valid",
+            "branch_actions",
+            "influence_reference_actions",
+            "branch_success",
+            "branch_terminations",
+            "branch_truncations",
+            "branch_state_ids",
+            "branch_main_images",
+            "branch_wrist_images",
+            "branch_measured_state16",
+        ):
+            self.rollout_batch.pop(field_name, None)
         return rollout_metrics
 
     @Worker.timer("actor/compute_opd_teacher_logprobs")

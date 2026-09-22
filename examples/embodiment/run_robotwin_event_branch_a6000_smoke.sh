@@ -55,6 +55,10 @@ export ROBOTWIN_BRANCH_INTERVAL="${ROBOTWIN_BRANCH_INTERVAL:-10}"
 export ROBOTWIN_EVENT_VALUE_LR="${ROBOTWIN_EVENT_VALUE_LR:-0.0}"
 export ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY="${ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY:-true}"
 export ROBOTWIN_EVENT_DIAGNOSTIC_FREEZE="${ROBOTWIN_EVENT_DIAGNOSTIC_FREEZE:-true}"
+# State-centred Influence scores need a same-observation policy reference at
+# PPO time.  These are inference-only Flow-SDE chunks, not simulator branches.
+# Keep this enabled for transport diagnostics even while lambda=0.
+export ROBOTWIN_EVENT_REFERENCE_CANDIDATES="${ROBOTWIN_EVENT_REFERENCE_CANDIDATES:-2}"
 
 mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}" "${RLINF_RAY_TMPDIR}"
 sidecar_resume_args=()
@@ -88,6 +92,7 @@ fi
   +algorithm.event_branch.execution_unit=full_action_chunk +algorithm.event_branch.repeat_primary_candidates=1 +algorithm.event_branch.min_supervision=999999 \
   +algorithm.event_branch.influence_lr=1.0e-4 \
   +algorithm.event_credit.granularity=chunk +algorithm.event_credit.max_lambda=0.0 +algorithm.event_credit.require_ranking_validation=true +algorithm.event_credit.ranking_validation_passed=false \
+  +algorithm.event_credit.reference_candidates="${ROBOTWIN_EVENT_REFERENCE_CANDIDATES}" \
   +algorithm.event_credit.min_supervision_for_actor=999999 \
   +algorithm.event_credit.influence_beta=0.02 +algorithm.event_credit.influence_clip=3.0 \
   actor.optim.lr=0.0 actor.optim.value_lr=0.0 actor.model.num_action_chunks="${ROBOTWIN_ACTION_CHUNK}" +rollout.model.num_action_chunks="${ROBOTWIN_ACTION_CHUNK}" actor.model.openpi.noise_method=flow_sde \

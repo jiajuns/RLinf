@@ -81,12 +81,16 @@ class MultiStepRolloutWorker(Worker):
         self.event_branch_candidates = int(event_branch_cfg.get("num_candidates", 0))
         self.event_branch_interval = int(event_branch_cfg.get("chunk_interval", 0))
         self.event_branch_repeat_primary = int(event_branch_cfg.get("repeat_primary_candidates", 0))
+        credit_cfg = self.algorithm_cfg.get("event_credit", {})
+        self.event_influence_reference_candidates = int(credit_cfg.get("reference_candidates", 0))
         if self.event_branch_candidates not in (0,) and self.event_branch_candidates < 2:
             raise ValueError("event_branch.num_candidates must be zero or at least two")
         if self.event_branch_candidates and self.event_branch_interval < 1:
             raise ValueError("event_branch.chunk_interval must be positive when branches are enabled")
         if not 0 <= self.event_branch_repeat_primary < max(self.event_branch_candidates, 1):
             raise ValueError("event_branch.repeat_primary_candidates must be in [0, num_candidates)")
+        if self.event_influence_reference_candidates not in (0,) and self.event_influence_reference_candidates < 2:
+            raise ValueError("event_credit.reference_candidates must be zero or at least two")
         self._event_branch_chunk_index = 0
         self.expert_model = None
         self.rlt_feature_model = None
@@ -595,6 +599,7 @@ class MultiStepRolloutWorker(Worker):
         *,
         final_obs: dict[str, Any] | None = None,
         branch_actions: torch.Tensor | None = None,
+        influence_reference_actions: torch.Tensor | None = None,
     ) -> PolicyOutput:
         intervene_flags = result.get("intervene_flags")
         if (
@@ -621,6 +626,7 @@ class MultiStepRolloutWorker(Worker):
                 dtype=torch.float32,
             ),
             branch_actions=branch_actions,
+            influence_reference_actions=influence_reference_actions,
         )
 
     def _sample_flow_sde_branches(
@@ -655,6 +661,25 @@ class MultiStepRolloutWorker(Worker):
         if any(candidate.shape != primary_actions.shape for candidate in candidates):
             raise RuntimeError("Flow-SDE branch candidates have inconsistent action shapes")
         return torch.stack(candidates, dim=1)
+
+    def _sample_influence_references(self, env_obs: dict[str, Any]) -> torch.Tensor | None:
+        """Sample non-executed same-state Flow-SDE reference chunks.
+
+        These samples define the policy-relative zero of a state-centered
+        Influence score.  They deliberately bypass the simulator: branch
+        rollout accounting remains unchanged and only inference cost grows.
+        """
+        if not self.event_influence_reference_candidates:
+            return None
+        references = []
+        for _ in range(self.event_influence_reference_candidates):
+            sampled, _ = self._predict_rollout_actions(env_obs)
+            if isinstance(sampled, np.ndarray):
+                sampled = torch.from_numpy(sampled)
+            references.append(sampled)
+        if not references or any(item.shape != references[0].shape for item in references):
+            raise RuntimeError("policy-relative Influence reference chunks are inconsistent")
+        return torch.stack(references, dim=1)
 
     def get_bootstrap_values(
         self, final_obs: dict[str, Any] | None
@@ -745,12 +770,14 @@ class MultiStepRolloutWorker(Worker):
                 branch_actions = self._sample_flow_sde_branches(
                     env_output["obs"], actions
                 )
+                influence_reference_actions = self._sample_influence_references(env_output["obs"])
 
                 policy_output = self._build_policy_output(
                     actions,
                     result,
                     final_obs=env_output.get("final_obs", None),
                     branch_actions=branch_actions,
+                    influence_reference_actions=influence_reference_actions,
                 )
                 self.send_to(
                     group_name=self.cfg.env.group_name,
@@ -1043,6 +1070,7 @@ class MultiStepRolloutWorker(Worker):
         split_intervene_flags = _split_optional_tensor(policy_output.intervene_flags)
         split_versions = _split_optional_tensor(policy_output.versions)
         split_branch_actions = _split_optional_tensor(policy_output.branch_actions)
+        split_influence_reference_actions = _split_optional_tensor(policy_output.influence_reference_actions)
         split_forward_inputs = (
             [{} for _ in sizes]
             if not policy_output.forward_inputs
@@ -1066,6 +1094,7 @@ class MultiStepRolloutWorker(Worker):
                 forward_inputs=split_forward_inputs[idx],
                 versions=split_versions[idx],
                 branch_actions=split_branch_actions[idx],
+                influence_reference_actions=split_influence_reference_actions[idx],
             )
             for idx in range(len(sizes))
         ]

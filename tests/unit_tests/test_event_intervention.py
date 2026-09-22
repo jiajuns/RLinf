@@ -4,6 +4,7 @@ from rlinf.algorithms.event_intervention import (
     EventInfluenceModel,
     branch_event_returns,
     intervention_influence,
+    policy_relative_influence,
 )
 
 
@@ -54,3 +55,17 @@ def test_influence_model_normalizes_online_float_inputs_to_its_parameter_dtype()
     prediction = model(torch.randn(2, 3, 3, dtype=torch.float32), torch.randn(2, 3, 2, dtype=torch.float32))
     assert prediction.dtype == torch.float64
     assert torch.isfinite(prediction).all()
+
+
+def test_policy_relative_influence_removes_state_common_score_offset():
+    representation = torch.tensor([[[2.0], [5.0]]])
+    action = torch.tensor([[[3.0], [7.0]]])
+    references = torch.tensor([[[[1.0], [2.0]], [[4.0], [6.0]]]])
+
+    def score(rep, act):
+        # The 100 * rep term is an arbitrary state-dependent offset that
+        # should never enter PPO credit after reference centering.
+        return 100.0 * rep.squeeze(-1) + act.squeeze(-1)
+
+    result = policy_relative_influence(score, representation, action, references)
+    torch.testing.assert_close(result, torch.tensor([[1.5, 2.0]]))

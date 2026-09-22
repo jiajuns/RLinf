@@ -2,7 +2,7 @@
 
 更新日期：2026-09-22  
 分支：`event-smdp-credit`  
-状态：**机制诊断完成第一轮；尚未满足开启 Event credit / Event-PPO 的条件。**
+状态：**已证明小样本排序可学习性；跨 episode 稳健性、严格 branch 重复性与 PPO 收益尚未建立，仍不满足开启 Event credit / Event-PPO 的条件。**
 
 ## 1. 本轮要回答的问题
 
@@ -366,6 +366,21 @@ R_{\mathrm{branch}}+\gamma G_{\mathrm{continuation}}.
 
 所以端点输入差异不是 Influence 或 sidecar 推理随机性，而是当前 RoboTwin/SAPIEN snapshot restore 后非零控制的细微物理/控制器状态差异。此时不能把 raw branch return 当无噪声 counterfactual 标签。短期安全处理是：重复 action 合并、按 repeat-noise 筛除 pair、保存 repeat variance 并在后续收集时按其降权；长期需要继续审计 RobotWin task/controller 的未快照 Python state，或采用官方支持的更严格 state clone API。`lambda` 仍保持 0。
 
+### 8.4 在线分数定义与下一轮顺序偏差诊断（待 A6000 运行验证）
+
+state-centered MSE 只约束同一状态内的候选差异。若网络输出为 (f(z,a))，任意状态函数 (c(z)) 都可构成同样等价的分数 (f(z,a)+c(z))。因此不能把 raw (f(z_t,a_t)) 直接当作跨时间步 Influence 写入 PPO；event 内再中心化也不能消除每个状态各自不同的偏移。
+
+代码现已改为在 rollout worker 从**同一观测**额外采样至少两个未执行的 Flow-SDE action chunk（仅增加模型推理，不增加 simulator interaction），并让 actor 使用：
+
+\[
+\widehat I(z,a)=f(z,a)-\frac1M\sum_{m=1}^{M}f(z,\tilde a_m),
+\qquad \tilde a_m\sim\pi(\cdot\mid z).
+\]
+
+branch 的在线训练 loss 也已同步改为 candidate-score 与 candidate return 均作同状态中心化，避免把 raw score 回归到中心化 target。只有 `granularity=chunk`、`reference_candidates>=2` 且未来显式通过 ranking gate 时才允许非零 Event mixing；目前配置仍为 `max_lambda=0`。
+
+续跑验证器新增 `--candidate-execution-order`。它允许以 `0,1,2` 和 `2,1,0` 等排列从同一 root snapshot 执行候选，但总是按 candidate identity 写出结果与 `execution_position`。下一次小规模 A6000 采集应比较同一 action 在不同执行位置的 endpoint 输入、bootstrap 与 continuation return：若差异系统性随 position 改变，则重复均值不能消除偏差，必须继续修复 snapshot/控制器状态；若主要是无方向随机波动，才能使用重复均值和方差构造可靠候选对。
+
 ## 9. 对当前方法效果的严格结论
 
 截至本报告：
@@ -373,13 +388,13 @@ R_{\mathrm{branch}}+\gamma G_{\mathrm{continuation}}.
 1. **除 snapshot 的严格物理重复性外，接口正确性得到较强支持。** chunk 时间单位、独立 Value target、GAE 隔离、sidecar 存档与单环境真实 RoboTwin rollout 均已经跑通；非零动作的 RoboTwin snapshot/restore 仍有可测 endpoint 偏差，不能再称为 exact same-state intervention。
 2. **Observer/RGB student 在修复后 cache 上已完成任务匹配训练。** 这不等价于泛化能力或在线端到端成功。
 3. **真实 candidate branches 有微弱但可测的 return spread。** 相比重复动作差异，平均候选差异约高一个数量级；但仍有不少 near-tie state，且 branch target 主要由短期 bootstrap 构成。
-4. **当前 Influence 尚未证明排序有效。** 即使用全部 candidate labels、episode-level heldout 和 100 epoch 离线训练，当前定义的 pairwise accuracy 为 0.302；还须用训练集拟合、tie-aware 分解和随机基准定位是优化、泛化、表示还是标签问题。
+4. **Influence 的小样本可学习性已有正面证据，但泛化不稳定。** 经重复 action 合并、可靠 pair 筛选和 state-centered 目标后，训练集 pairwise 为 `0.970`；LOEO held-out 分别为 `0.774/0.600/0.481/0.768`。这支持“该组修改后的方案能学习部分未见 episode 的候选排序”，但 seed 852 近随机，且仅四个相关 episode group，不能把它写成稳健 held-out 结论。
 5. **没有 EventValue-RL 成功率提升可报告。** 没有启动 Event-PPO，也不能把任何 `success_once` 当作 Ours 的性能。
 
 因此，当前唯一严谨的实验状态是：
 
 \[
-\boxed{\text{Event branch pipeline works, but the current Influence model has not yet demonstrated useful held-out action ranking.}}
+\boxed{\text{Event branch pipeline works; Influence has partial held-out ranking evidence, but robust generalization, branch-label integrity, and PPO gain remain unproven.}}
 \]
 
 ## 10. 当前代码改动
@@ -411,12 +426,11 @@ git push user event-smdp-credit
 
 不要直接扩训练或开启 `lambda>0`。优先级应为：
 
-1. **小样本拟合诊断。** 固定高于重复噪声的分支样本，冻结特征与标签，分别报告训练/验证的中心化 MSE、zero-predictor 比值、concordant/discordant/predicted ties、Kendall-tau-b、状态内随机对应基准；先区分对齐/优化错误与泛化不足。
-2. **先验证 Event Value target 本身。** 对固定 SFT 的一部分 branch endpoint，让策略继续执行至 episode 结束，比较 `R_branch + gamma V_E` 的排序与真实剩余折扣回报，并对部分状态重复 continuation；目前 branch outcome 主要依赖 learned bootstrap，尚未证明它是任务回报的可靠 proxy。
-3. **端到端前端检查。** 在同一有标签轨迹比较 `cache teacher → Observer` 与 `RGB student → Observer` 的 boundary、progress 和 Value 指标，确定前端蒸馏误差是否传递为 Event/Value 误差。
-4. **提高候选可辨识性而非盲目增加状态数。** 在接触、姿态调整、临近完成/失败恢复等关键状态采样；比较更有差异的 Flow-SDE candidates、合理延长 branch horizon，且将实际 branch transitions 计入总 interaction budget。
-5. **重新收集 train / heldout episode group。** 当前只有四个 seed group，不能作为最终统计。应收集数百 state、更多独立 reset seeds，并冻结 Observer、RGB student、target Event Value 后训练/测试 Influence。
-6. **通过门槛后才开始 PPO 混合。** 至少预先定义并达到 heldout pairwise accuracy、Kendall-tau-b、top-1 regret 相对随机/zero control 的门槛；之后以 `lambda: 0 → 0.1 → 0.25` 的保守 schedule 做 paired GAE 对照。原 PPO critic target 始终保持 GAE。
+1. **A6000 接入回归。** 在 `lambda=0` 下验证新 transport 的 reference action shape、同状态相对 score 及 loss 均为有限数；再显式断言没有 reference action 时，任何未来的 `max_lambda>0` 配置立即拒绝启动。
+2. **执行顺序偏差。** 用新 `--candidate-execution-order` 以至少两个相反排列执行同一批 root states；逐 action 对齐比较 endpoint、bootstrap 与 continuation。先区分位置偏差与随机 repeat noise。
+3. **扩大独立 episode 与 continuation 验证。** 预先划分新的 train/validation/test reset seed groups，在接触、调整和临近终止状态上比较 `R_branch + gamma V_E` 与固定 SFT 的真实续跑回报；把续跑方差接近候选差异的 pair 标为不确定或增加重复次数。
+4. **冻结标签生成器后再扩 Influence 数据。** 固定 Observer、RGB student 和 target Event Value，保留全部 state 与 high-signal 子集的比例，报告 LOEO、Kendall-\(\tau_b\)、top-1 regret、prediction spread 与 statewise shuffle；不要只在筛选后的容易状态上作总论。
+5. **通过预注册门槛后才开始 PPO 混合。** 至少预先定义 held-out pairwise、Kendall-\(\tau_b\)、top-1 regret 相对随机/zero control 的门槛；之后以 `lambda: 0 → 0.1 → 0.25` 的保守 schedule 做 paired GAE 对照。原 PPO critic target 始终保持 GAE。
 7. **完成 oracle 诊断阶梯。**
 
    \[

@@ -1289,6 +1289,7 @@ class EnvWorker(Worker):
                         branch_mask=env_output.branch_mask,
                         branch_valid=env_output.branch_valid,
                         branch_actions=env_output.branch_actions,
+                        influence_reference_actions=policy_output.influence_reference_actions,
                         branch_success=env_output.branch_success,
                         branch_terminations=env_output.branch_terminations,
                         branch_truncations=env_output.branch_truncations,

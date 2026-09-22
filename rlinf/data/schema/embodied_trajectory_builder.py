@@ -70,6 +70,7 @@ class EmbodiedTrajectoryBuilder:
     branch_mask: list[torch.Tensor] = field(default_factory=list)
     branch_valid: list[torch.Tensor] = field(default_factory=list)
     branch_actions: list[torch.Tensor] = field(default_factory=list)
+    influence_reference_actions: list[torch.Tensor] = field(default_factory=list)
     branch_success: list[torch.Tensor] = field(default_factory=list)
     branch_terminations: list[torch.Tensor] = field(default_factory=list)
     branch_truncations: list[torch.Tensor] = field(default_factory=list)
@@ -121,6 +122,7 @@ class EmbodiedTrajectoryBuilder:
             ("branch_mask", self.branch_mask),
             ("branch_valid", self.branch_valid),
             ("branch_actions", self.branch_actions),
+            ("influence_reference_actions", self.influence_reference_actions),
             ("branch_success", self.branch_success),
             ("branch_terminations", self.branch_terminations),
             ("branch_truncations", self.branch_truncations),
@@ -220,6 +222,7 @@ class EmbodiedTrajectoryBuilder:
         self.branch_mask.clear()
         self.branch_valid.clear()
         self.branch_actions.clear()
+        self.influence_reference_actions.clear()
         self.branch_success.clear()
         self.branch_terminations.clear()
         self.branch_truncations.clear()
@@ -276,6 +279,7 @@ class EmbodiedTrajectoryBuilder:
             ("branch_mask", self.branch_mask),
             ("branch_valid", self.branch_valid),
             ("branch_actions", self.branch_actions),
+            ("influence_reference_actions", self.influence_reference_actions),
             ("branch_success", self.branch_success),
             ("branch_terminations", self.branch_terminations),
             ("branch_truncations", self.branch_truncations),

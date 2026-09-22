@@ -415,6 +415,10 @@ class PolicyOutput:
     # executed Flow-SDE draw; later candidates are independent draws from the
     # same observation/state and are only used for controlled branches.
     branch_actions: torch.Tensor = None
+    # Same-observation Flow-SDE samples used only to remove the arbitrary
+    # state-common offset of a state-centered Influence score.  Unlike
+    # ``branch_actions`` these are never executed in the simulator.
+    influence_reference_actions: torch.Tensor = None  # [B, candidates, action_chunk, action_dim]
 
     def __post_init__(self):
         if self.actions is not None:
@@ -433,6 +437,8 @@ class PolicyOutput:
             self.versions = self.versions.cpu().contiguous()
         if self.branch_actions is not None:
             self.branch_actions = self.branch_actions.cpu().contiguous()
+        if self.influence_reference_actions is not None:
+            self.influence_reference_actions = self.influence_reference_actions.cpu().contiguous()
 
     @staticmethod
     def merge(
@@ -463,6 +469,7 @@ class PolicyOutput:
             forward_inputs=merged_forward_inputs,
             versions=_merge_optional_tensor("versions"),
             branch_actions=_merge_optional_tensor("branch_actions"),
+            influence_reference_actions=_merge_optional_tensor("influence_reference_actions"),
         )
 
 
@@ -487,6 +494,7 @@ class ChunkStepResult:
     branch_mask: torch.Tensor = None
     branch_valid: torch.Tensor = None
     branch_actions: torch.Tensor = None
+    influence_reference_actions: torch.Tensor = None
     branch_success: torch.Tensor = None
     branch_terminations: torch.Tensor = None
     branch_truncations: torch.Tensor = None
@@ -525,6 +533,7 @@ class ChunkStepResult:
             "branch_mask",
             "branch_valid",
             "branch_actions",
+            "influence_reference_actions",
             "branch_success",
             "branch_terminations",
             "branch_truncations",
@@ -567,6 +576,7 @@ class Trajectory:
     branch_mask: torch.Tensor = None
     branch_valid: torch.Tensor = None
     branch_actions: torch.Tensor = None
+    influence_reference_actions: torch.Tensor = None
     branch_success: torch.Tensor = None
     branch_terminations: torch.Tensor = None
     branch_truncations: torch.Tensor = None

@@ -98,6 +98,36 @@ class EventInfluenceModel(nn.Module):
         return error.masked_select(mask.bool()).mean()
 
 
+def policy_relative_influence(
+    scorer: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    event_representation: torch.Tensor,
+    action: torch.Tensor,
+    reference_actions: torch.Tensor,
+) -> torch.Tensor:
+    """Score an action relative to same-state policy action samples.
+
+    State-centered Influence training identifies ranking only up to an
+    arbitrary state-specific offset.  PPO must therefore consume
+    ``f(z,a) - mean_m f(z,a_ref_m)`` rather than raw ``f(z,a)``.  Reference
+    chunks are sampled from the current Flow-SDE policy but are *not*
+    simulator branches, so they add inference cost but no environment
+    interactions.  Prefix is arbitrary (normally ``[batch,chunks]``).
+    """
+    if event_representation.shape[:-1] != action.shape[:-1]:
+        raise ValueError("event representation/action prefixes must match")
+    if reference_actions.ndim != action.ndim + 1 or reference_actions.shape[:-2] != action.shape[:-1]:
+        raise ValueError("reference actions must be [..., candidates, action_dim]")
+    if reference_actions.shape[-1] != action.shape[-1] or reference_actions.shape[-2] < 1:
+        raise ValueError("reference candidate dimension/action width is invalid")
+    score = scorer(event_representation, action)
+    candidates = reference_actions.shape[-2]
+    reference_representation = event_representation.unsqueeze(-2).expand(*event_representation.shape[:-1], candidates, event_representation.shape[-1])
+    reference_score = scorer(reference_representation, reference_actions)
+    if score.shape != action.shape[:-1] or reference_score.shape != reference_actions.shape[:-1]:
+        raise ValueError("Influence scorer returned incompatible score shapes")
+    return score - reference_score.mean(dim=-1)
+
+
 def _restore_snapshot(environment: SnapshotEnvironment, state: Any) -> None:
     """Use RLinf's real ManiSkill snapshot API, retaining legacy test adapters."""
     restore = getattr(environment, "load_state", None)

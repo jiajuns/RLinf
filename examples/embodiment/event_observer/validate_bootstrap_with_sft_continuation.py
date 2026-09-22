@@ -113,9 +113,22 @@ def main() -> None:
     parser.add_argument("--tie-eps", type=float, default=1e-4)
     parser.add_argument("--duplicate-first-candidate", action="store_true",
                         help="Replace the last sampled candidate by candidate 0 to measure restore/input/value repeat noise.")
+    parser.add_argument(
+        "--candidate-execution-order",
+        default=None,
+        help=("Comma-separated permutation controlling simulator branch execution order. "
+              "Rows are always written in candidate-index order, so two runs with "
+              "different permutations can test execution-position bias."),
+    )
     args = parser.parse_args()
     if args.candidates < 2 or args.continuation_repeats < 1 or not 0 < args.gamma <= 1:
         raise ValueError("need >=2 candidates, >=1 repeat and gamma in (0,1]")
+    if args.candidate_execution_order is None:
+        execution_order = list(range(args.candidates))
+    else:
+        execution_order = [int(value) for value in args.candidate_execution_order.split(",") if value]
+        if sorted(execution_order) != list(range(args.candidates)):
+            raise ValueError("candidate-execution-order must be a permutation of all candidate indices")
     if not torch.cuda.is_available():
         raise RuntimeError("this diagnostic intentionally requires CUDA for frozen pi0.5 inference")
     cfg = OmegaConf.load(args.resolved_config)
@@ -140,9 +153,10 @@ def main() -> None:
                 candidate_actions = [_sample_action(model, observation, args.seed + 1009 * current_chunk + candidate) for candidate in range(args.candidates)]
                 if args.duplicate_first_candidate:
                     candidate_actions[-1] = candidate_actions[0].clone()
-                branch_rows = []
+                branch_rows_by_candidate: list[dict | None] = [None] * args.candidates
                 try:
-                    for candidate, action in enumerate(candidate_actions):
+                    for execution_position, candidate in enumerate(execution_order):
+                        action = candidate_actions[candidate]
                         env.load_state(root)
                         endpoint, branch_reward, terminal = _chunk(env, action)
                         endpoint_history = root_history + [endpoint]
@@ -163,16 +177,23 @@ def main() -> None:
                                 continuation_obs, reward, done = _chunk(env, follow)
                                 continuation_reward += discount * reward; discount *= args.gamma
                             continuation_returns.append(continuation_reward)
-                        branch_rows.append({
+                        branch_rows_by_candidate[candidate] = {
                             "candidate": candidate, "branch_reward": branch_reward, "terminal": terminal,
+                            "execution_position": execution_position,
                             "bootstrap_target": bootstrap, "endpoint_value_first": first_value,
                             "endpoint_value_repeat_absdiff": abs(first_value - second_value),
                             "endpoint_input_fingerprint": _endpoint_fingerprint(endpoint),
                             "action_fingerprint": _action_fingerprint(action), "continuation_returns": continuation_returns,
                             "continuation_mean": float(np.mean(continuation_returns)), "continuation_std": float(np.std(continuation_returns)),
-                        })
+                        }
                 finally:
                     env.load_state(root)
+                if any(row is None for row in branch_rows_by_candidate):
+                    raise RuntimeError("candidate execution did not produce one row per candidate")
+                # Preserve candidate identity for ranking; execution position
+                # remains an explicit diagnostic field instead of silently
+                # becoming a candidate-index confounder.
+                branch_rows = [row for row in branch_rows_by_candidate if row is not None]
                 bootstrap = np.asarray([row["bootstrap_target"] for row in branch_rows])
                 continuation = np.asarray([row["continuation_mean"] for row in branch_rows])
                 repeat_controls = []
@@ -207,6 +228,7 @@ def main() -> None:
                              "continuation_target": "R_branch + gamma * fixed-SFT discounted continuation return",
                              "state_selection": "time-stratified; no oracle state input", "gamma": args.gamma},
               "aggregate": aggregate, "state_reports": reports}
+    result["protocol"]["candidate_execution_order"] = execution_order
     args.output.parent.mkdir(parents=True, exist_ok=True); args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2), flush=True)
 
