@@ -99,6 +99,17 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
         success = np.asarray(handle["success"], bool)
         roster = str(handle.attrs["node_roster_json"])
         task = str(handle.attrs["task"])
+        # The cache itself does not copy RGB, but its paired RGB source is
+        # consumed later by the online-capable student.  Touch the final
+        # required frames now so a partially transferred/truncated HDF5 can
+        # never become an apparently valid teacher cache and fail only during
+        # GPU training.
+        if "rgb" not in handle:
+            raise ValueError("observer source lacks RGB required by the online student")
+        for camera in ("head_camera", "right_camera"):
+            if camera not in handle["rgb"] or len(handle["rgb"][camera]) != len(times):
+                raise ValueError(f"observer source has no time-aligned {camera} RGB")
+            _ = np.asarray(handle["rgb"][camera][-1], dtype=np.uint8)
     if len(times) != tracks.shape[1]:
         raise ValueError("SAM track length does not match oracle sidecar")
     if np.any(np.diff(times) <= 0):
