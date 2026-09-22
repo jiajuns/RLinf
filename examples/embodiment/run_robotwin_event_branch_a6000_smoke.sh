@@ -7,14 +7,16 @@
 set -euo pipefail
 
 export A6000_ROOT="${A6000_ROOT:-/home/chefmate/Data/pirl_a6000_run}"
-export REPO_PATH="${A6000_ROOT}/RLinf-piRL"
+export REPO_PATH="${REPO_PATH:-${A6000_ROOT}/RLinf-piRL}"
 export ROBOTWIN_PATH="${A6000_ROOT}/RoboTwin-RLinf_support"
 export ROBOTWIN_ASSETS_PATH="${A6000_ROOT}/RoboTwin_v14_dual_gpu_20260831"
 export ROBOTWIN_PI05_MODEL="${A6000_ROOT}/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
 export ROBOTWIN_EVENT_OBSERVER_CKPT="${A6000_ROOT}/robotwin_adjust_bottle_event_pretrain_v1_200plus/best.pt"
 export ROBOTWIN_EVENT_RGB_STUDENT_CKPT="${A6000_ROOT}/robotwin_adjust_bottle_rgb_student_v1_200plus/best.pt"
-# rsync receives this source file at A6000_ROOT/eventvalue_sidecars.pt.
-export ROBOTWIN_EVENT_SIDECAR_RESUME="${A6000_ROOT}/eventvalue_sidecars.pt"
+# A resumed sidecar is optional.  A collection used to calibrate a freshly
+# trained Observer must not silently overwrite its Event Value with an older,
+# incompatible sidecar checkpoint.
+export ROBOTWIN_EVENT_SIDECAR_RESUME="${ROBOTWIN_EVENT_SIDECAR_RESUME:-}"
 export ROBOTWIN_EVENT_DIAGNOSTIC_DIR="${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smoke/raw"
 export ROBOTWIN_LOG_PATH="${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smoke"
 
@@ -39,8 +41,14 @@ export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-2}"
 export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-16}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-2}"
 export ROBOTWIN_BRANCH_COLLECT_EPOCHS="${ROBOTWIN_BRANCH_COLLECT_EPOCHS:-1}"
+export ROBOTWIN_ACTION_CHUNK="${ROBOTWIN_ACTION_CHUNK:-50}"
+export ROBOTWIN_BRANCH_INTERVAL="${ROBOTWIN_BRANCH_INTERVAL:-10}"
 
 mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}" "${RLINF_RAY_TMPDIR}"
+sidecar_resume_args=()
+if [[ -n "${ROBOTWIN_EVENT_SIDECAR_RESUME}" ]]; then
+  sidecar_resume_args=("+algorithm.event_sidecar.resume_sidecar_path=${ROBOTWIN_EVENT_SIDECAR_RESUME}")
+fi
 "${A6000_ROOT}/env_pirl_pi05/bin/python" \
   "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   --config-path config --config-name robotwin_adjust_bottle_ppo_openpi_pi05 \
@@ -57,19 +65,19 @@ mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}" "${RLINF_RAY_
   +algorithm.event_value_source=learned_sidecar +algorithm.event_boundary_threshold=0.5 \
   +algorithm.event_sidecar.observer_checkpoint="${ROBOTWIN_EVENT_OBSERVER_CKPT}" \
   +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
-  +algorithm.event_sidecar.resume_sidecar_path="${ROBOTWIN_EVENT_SIDECAR_RESUME}" \
-  +algorithm.event_sidecar.target_ema_decay=0.995 +algorithm.event_sidecar.proprio_time_delta=50.0 +algorithm.event_sidecar.online_mount_token=2 +algorithm.event_sidecar.bootstrap_on_truncation=false \
-  +algorithm.event_sidecar.strict_input_contract=false \
+  "${sidecar_resume_args[@]}" \
+  +algorithm.event_sidecar.target_ema_decay=0.995 +algorithm.event_sidecar.proprio_time_delta="${ROBOTWIN_ACTION_CHUNK}" +algorithm.event_sidecar.online_mount_token=2 +algorithm.event_sidecar.bootstrap_on_truncation=false \
+  +algorithm.event_sidecar.strict_input_contract=true \
   +algorithm.event_sidecar.value_lr=0.0 \
   +algorithm.event_diagnostics.output_dir="${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" \
   +algorithm.event_diagnostics.record_only=true \
   +algorithm.event_diagnostics.freeze_sidecars=true \
-  +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 \
+  +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval="${ROBOTWIN_BRANCH_INTERVAL}" \
   +algorithm.event_branch.execution_unit=full_action_chunk +algorithm.event_branch.repeat_primary_candidates=1 +algorithm.event_branch.min_supervision=999999 \
   +algorithm.event_branch.influence_lr=1.0e-4 \
   +algorithm.event_credit.granularity=chunk +algorithm.event_credit.max_lambda=0.0 +algorithm.event_credit.require_ranking_validation=true +algorithm.event_credit.ranking_validation_passed=false \
   +algorithm.event_credit.min_supervision_for_actor=999999 \
   +algorithm.event_credit.influence_beta=0.02 +algorithm.event_credit.influence_clip=3.0 \
-  actor.optim.lr=0.0 actor.optim.value_lr=0.0 actor.model.openpi.noise_method=flow_sde \
+  actor.optim.lr=0.0 actor.optim.value_lr=0.0 actor.model.num_action_chunks="${ROBOTWIN_ACTION_CHUNK}" +rollout.model.num_action_chunks="${ROBOTWIN_ACTION_CHUNK}" actor.model.openpi.noise_method=flow_sde \
   +actor.model.openpi.joint_logprob=false actor.model.openpi.value_after_vlm=false \
   actor.global_batch_size="${ROBOTWIN_GLOBAL_BATCH}" actor.micro_batch_size="${ROBOTWIN_MICRO_BATCH}"
