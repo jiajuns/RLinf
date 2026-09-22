@@ -409,6 +409,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         branch_state_ids: torch.Tensor,
         branch_actions: torch.Tensor,
         state_representations: torch.Tensor,
+        policy_reference_actions: torch.Tensor | None,
     ) -> None:
         """Persist raw matched-state branch diagnostics for offline auditing.
 
@@ -432,6 +433,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             raise RuntimeError("diagnostic cloned-state identity must include seed and elapsed-step columns")
         if state_representations.shape[:2] != branch_returns.shape[:2] or state_representations.ndim != 3:
             raise RuntimeError("diagnostic Event representations are not aligned to branch returns")
+        if policy_reference_actions is not None:
+            if policy_reference_actions.ndim != 5 or policy_reference_actions.shape[:2] != branch_returns.shape[:2]:
+                raise RuntimeError(
+                    "policy-reference actions must be [chunks,batch,candidates,action_chunk,action_dim]"
+                )
         selected = branch_mask.bool()
         if not bool(selected.any()):
             return
@@ -489,6 +495,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             branch_returns=branch_returns[selected].detach().float().cpu().numpy(),
             predicted_scores=predicted_scores[selected].detach().float().cpu().numpy(),
             candidate_actions=branch_actions[selected].detach().float().cpu().numpy(),
+            # These non-executed Flow-SDE samples are retained solely for
+            # reference-mean stability audits (2/4/8 samples).  They are not
+            # simulator data and never become policy/Observer inputs.
+            policy_reference_actions=(
+                policy_reference_actions[selected].detach().float().cpu().numpy()
+                if policy_reference_actions is not None
+                else np.empty((int(selected.sum().item()), 0), dtype=np.float32)
+            ),
             candidate_valid_mask=branch_valid[selected].detach().cpu().numpy(),
             branch_rewards=branch_rewards[selected].detach().float().cpu().numpy(),
             branch_bootstrap_values=branch_bootstrap_values[selected].detach().float().cpu().numpy(),
@@ -707,6 +721,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         branch_state_ids=branch_state_ids,
                         branch_actions=self.rollout_batch["branch_actions"].to(device),
                         state_representations=representations.permute(1, 0, 2),
+                        policy_reference_actions=self.rollout_batch.get("influence_reference_actions").to(device)
+                        if self.rollout_batch.get("influence_reference_actions") is not None
+                        else None,
                     )
                 elif self.cfg.algorithm.get("event_diagnostics", {}).get("output_dir", None):
                     raise RuntimeError(

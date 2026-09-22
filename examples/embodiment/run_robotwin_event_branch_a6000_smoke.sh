@@ -50,6 +50,8 @@ export ROBOTWIN_TRAIN_ENVS="${ROBOTWIN_TRAIN_ENVS:-2}"
 export ROBOTWIN_GLOBAL_BATCH="${ROBOTWIN_GLOBAL_BATCH:-16}"
 export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-2}"
 export ROBOTWIN_BRANCH_COLLECT_EPOCHS="${ROBOTWIN_BRANCH_COLLECT_EPOCHS:-1}"
+export ROBOTWIN_ROLLOUT_EPOCH="${ROBOTWIN_ROLLOUT_EPOCH:-4}"
+export ROBOTWIN_PPO_UPDATE_EPOCHS="${ROBOTWIN_PPO_UPDATE_EPOCHS:-5}"
 export ROBOTWIN_ACTION_CHUNK="${ROBOTWIN_ACTION_CHUNK:-50}"
 export ROBOTWIN_BRANCH_INTERVAL="${ROBOTWIN_BRANCH_INTERVAL:-10}"
 export ROBOTWIN_EVENT_VALUE_LR="${ROBOTWIN_EVENT_VALUE_LR:-0.0}"
@@ -59,11 +61,16 @@ export ROBOTWIN_EVENT_DIAGNOSTIC_FREEZE="${ROBOTWIN_EVENT_DIAGNOSTIC_FREEZE:-tru
 # PPO time.  These are inference-only Flow-SDE chunks, not simulator branches.
 # Keep this enabled for transport diagnostics even while lambda=0.
 export ROBOTWIN_EVENT_REFERENCE_CANDIDATES="${ROBOTWIN_EVENT_REFERENCE_CANDIDATES:-2}"
+export ROBOTWIN_TRAIN_SEEDS_PATH="${ROBOTWIN_TRAIN_SEEDS_PATH:-}"
 
 mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}" "${RLINF_RAY_TMPDIR}"
 sidecar_resume_args=()
 if [[ -n "${ROBOTWIN_EVENT_SIDECAR_RESUME}" ]]; then
   sidecar_resume_args=("+algorithm.event_sidecar.resume_sidecar_path=${ROBOTWIN_EVENT_SIDECAR_RESUME}")
+fi
+seed_manifest_args=()
+if [[ -n "${ROBOTWIN_TRAIN_SEEDS_PATH}" ]]; then
+  seed_manifest_args=("env.train.seeds_path=${ROBOTWIN_TRAIN_SEEDS_PATH}")
 fi
 "${A6000_ROOT}/env_pirl_pi05/bin/python" \
   "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
@@ -71,12 +78,13 @@ fi
   runner.max_epochs="${ROBOTWIN_BRANCH_COLLECT_EPOCHS}" \
   runner.logger.log_path="${ROBOTWIN_LOG_PATH}" runner.logger.experiment_name=robotwin_adjust_bottle_branch_a6000_smoke \
   runner.val_check_interval=-1 runner.save_interval="${ROBOTWIN_BRANCH_COLLECT_EPOCHS}" \
-  env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" env.train.rollout_epoch=4 env.eval.total_num_envs=1 env.eval.rollout_epoch=1 \
+  env.train.total_num_envs="${ROBOTWIN_TRAIN_ENVS}" env.train.rollout_epoch="${ROBOTWIN_ROLLOUT_EPOCH}" env.eval.total_num_envs=1 env.eval.rollout_epoch=1 \
+  "${seed_manifest_args[@]}" \
   env.train.assets_path="${ROBOTWIN_ASSETS_PATH}" env.eval.assets_path="${ROBOTWIN_ASSETS_PATH}" \
   env.train.video_cfg.save_video=false env.eval.video_cfg.save_video=false \
   actor.model.model_path="${ROBOTWIN_PI05_MODEL}" rollout.model.model_path="${ROBOTWIN_PI05_MODEL}" \
   +rollout.unnorm_key=adjust_bottle +rollout.collect_transitions=true \
-  algorithm.reward_type=chunk_level algorithm.logprob_type=chunk_level \
+  algorithm.reward_type=chunk_level algorithm.logprob_type=chunk_level algorithm.update_epoch="${ROBOTWIN_PPO_UPDATE_EPOCHS}" \
   algorithm.adv_type=event_smdp_residual algorithm.loss_type=actor_critic \
   +algorithm.event_value_source=learned_sidecar +algorithm.event_boundary_threshold=0.5 \
   +algorithm.event_sidecar.observer_checkpoint="${ROBOTWIN_EVENT_OBSERVER_CKPT}" \

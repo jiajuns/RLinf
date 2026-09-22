@@ -435,11 +435,12 @@ git push user event-smdp-credit
 
 不要直接扩训练或开启 `lambda>0`。优先级应为：
 
-1. **A6000 接入回归。** 在 `lambda=0` 下验证新 transport 的 reference action shape、同状态相对 score 及 loss 均为有限数；再显式断言没有 reference action 时，任何未来的 `max_lambda>0` 配置立即拒绝启动。
-2. **执行顺序偏差。** 用新 `--candidate-execution-order` 以至少两个相反排列执行同一批 root states；逐 action 对齐比较 endpoint、bootstrap 与 continuation。先区分位置偏差与随机 repeat noise。
-3. **扩大独立 episode 与 continuation 验证。** 预先划分新的 train/validation/test reset seed groups，在接触、调整和临近终止状态上比较 `R_branch + gamma V_E` 与固定 SFT 的真实续跑回报；把续跑方差接近候选差异的 pair 标为不确定或增加重复次数。
-4. **冻结标签生成器后再扩 Influence 数据。** 固定 Observer、RGB student 和 target Event Value，保留全部 state 与 high-signal 子集的比例，报告 LOEO、Kendall-\(\tau_b\)、top-1 regret、prediction spread 与 statewise shuffle；不要只在筛选后的容易状态上作总论。
-5. **通过预注册门槛后才开始 PPO 混合。** 至少预先定义 held-out pairwise、Kendall-\(\tau_b\)、top-1 regret 相对随机/zero control 的门槛；之后以 `lambda: 0 → 0.1 → 0.25` 的保守 schedule 做 paired GAE 对照。原 PPO critic target 始终保持 GAE。
+1. **已完成：A6000 接入回归。** 参考 action transport、chunk/token 清理、完整 rollout 和冻结 PPO update 都已运行通过；没有 reference action 时，未来 `max_lambda>0` 配置会拒绝启动。
+2. **已完成第一轮：执行顺序审计。** 现在有同进程、同 root、branch-only 的三状态结果；它只定义了噪声处理需求，尚不足以判定系统性 position bias。
+3. **当前执行：预注册独立 episode 验证。** 用 `make_robotwin_branch_seed_split.py` 从官方 train seed manifest 固定抽取 32 条互不重叠的 reset seed：16 train、8 validation、8 test；三个集合写为独立的 RLinf-compatible seed 文件。既有 4 条 episode 仅保留为开发数据，不能进入最终 test。
+4. **冻结标签生成器后收集并评估。** 固定 Observer、RGB student、target Event Value、chunk=5、gamma=.99、state-centered MSE 与 `lambda=0`；每个 episode 按预设 branch interval 抽取少量 state。新 artifact 保存全部 state、重复 candidate noise、candidate action、state ID 和 8 个非执行 policy reference action。先用 train 拟合 Influence，validation 选 checkpoint，test 只报告一次 LOEO/pairwise/Kendall-\(\tau_b\)/top-1 regret/shuffle 对照。
+5. **reference 与 continuation 校验。** 用 `audit_policy_reference_stability.py` 以 2/4/8 个保存的 reference action 估计 \(\hat I\) 数值与符号稳定性；在 test 的预定子集执行固定 SFT continuation，且对续跑方差接近候选差异的 pair 标为不确定或增加重复次数。
+6. **通过预注册门槛后才开始 PPO 混合。** 至少预先定义 held-out pairwise、Kendall-\(\tau_b\)、top-1 regret 相对随机/zero control 的门槛；之后以 `lambda: 0 → 0.1 → 0.25` 的保守 schedule 做 paired GAE 对照。原 PPO critic target 始终保持 GAE。
 7. **完成 oracle 诊断阶梯。**
 
    \[
