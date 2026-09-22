@@ -36,18 +36,31 @@ def image_mismatch_fraction(left: dict, right: dict) -> dict[str, float]:
 def snapshot_component_hashes(state: bytes) -> dict[str, str]:
     """Debug identity without treating a whole pickle as a physics oracle."""
     payload = pickle.loads(state)
+    def content_digest(value) -> str:
+        """Hash values rather than pickle's tensor-storage bookkeeping."""
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().contiguous()
+            encoded = ("tensor", str(value.dtype), tuple(value.shape), value.numpy().tobytes())
+        elif hasattr(value, "dtype") and hasattr(value, "shape") and hasattr(value, "tobytes"):
+            encoded = ("array", str(value.dtype), tuple(value.shape), value.tobytes())
+        elif isinstance(value, dict):
+            encoded = ("dict", tuple((str(key), content_digest(item)) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))))
+        elif isinstance(value, (list, tuple)):
+            encoded = (type(value).__name__, tuple(content_digest(item) for item in value))
+        else:
+            encoded = (type(value).__name__, repr(value))
+        return hashlib.sha256(pickle.dumps(encoded, protocol=pickle.HIGHEST_PROTOCOL)).hexdigest()[:12]
+
     result = {
-        "python_rng": hashlib.sha256(pickle.dumps(payload["python_rng"])).hexdigest()[:12],
-        "numpy_rng": hashlib.sha256(pickle.dumps(payload["numpy_rng"])).hexdigest()[:12],
-        "torch_rng": hashlib.sha256(payload["torch_rng"].numpy().tobytes()).hexdigest()[:12],
+        "python_rng": content_digest(payload["python_rng"]),
+        "numpy_rng": content_digest(payload["numpy_rng"]),
+        "torch_rng": content_digest(payload["torch_rng"]),
     }
     for index, subenv in enumerate(payload["subenv_states"]):
         result[f"physics_{index}"] = hashlib.sha256(subenv["physics"]).hexdigest()[:12]
-        result[f"task_fields_{index}"] = hashlib.sha256(
-            pickle.dumps(subenv["task_fields"], protocol=pickle.HIGHEST_PROTOCOL)
-        ).hexdigest()[:12]
+        result[f"task_fields_{index}"] = content_digest(subenv["task_fields"])
     for key in ("prev_step_reward", "elapsed_steps", "success_once", "fail_once", "returns", "is_start"):
-        result[key] = hashlib.sha256(pickle.dumps(payload.get(key))).hexdigest()[:12]
+        result[key] = content_digest(payload.get(key))
     return result
 
 
