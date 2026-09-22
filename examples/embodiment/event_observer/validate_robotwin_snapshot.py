@@ -73,7 +73,12 @@ def main() -> None:
             raise AssertionError("RoboTwin online observer did not receive measured_state16")
         action_chunk = 50
         repeated_actions = torch.zeros((1, 2, action_chunk, 14), dtype=torch.float32)
+        # A branch is allowed to produce labels, but must return the live
+        # rollout exactly to its pre-branch state before PPO continues.
+        pre_branch_snapshot = env.get_state()
         branch = env.branch_step(repeated_actions)
+        if env.get_state() != pre_branch_snapshot:
+            raise AssertionError("branch_step changed the live RoboTwin rollout state")
         if not bool(branch["branch_mask"].all()) or branch["branch_measured_state16"].shape != (1, 2, 16):
             raise AssertionError("matched-state branch did not return measured state")
         if not branch["branch_requested_steps"].eq(action_chunk).all() or not branch["branch_horizons"].le(action_chunk).all():
