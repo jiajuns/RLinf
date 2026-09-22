@@ -256,6 +256,24 @@ train_influence_from_branch_diagnostics.py
 
 **当前验证未通过。** 该模型尚未展示可用的跨 episode 候选排序；MSE 的下降可能主要反映中心化 return 的小尺度，而不是模型学到了候选动作优劣。此处的 0.3019 尚未分解 predicted ties/concordant/discordant，也尚未与状态内随机对应基准比较，因而不能据此声称模型“反向排序”，更不能说明 branch 标签本身无用。当前 Influence Model 不应接管、也不应重新分配 PPO advantage。
 
+### 8.1 后续补充：小样本拟合诊断（v2）
+
+报告初版后的诊断工具补齐了中心化 target 的 zero-predictor MSE、预测平局、concordant/discordant、Kendall-tau-b 与 statewise candidate-correspondence shuffle 基准，并在同一组 episode-level split 上重新训练。结果如下：
+
+| 指标 | train（120 states） | validation（40 states） |
+|---|---:|---:|
+| zero-predictor MSE | `1.73e-6` | `1.45e-6` |
+| model MSE | `2.03e-6` | `8.04e-6` |
+| model / zero MSE | `1.17` | `5.54` |
+| eligible non-tie pairs | 348 | 106 |
+| concordant / discordant | 69 / 94 | 11 / 20 |
+| predicted ties | 185 | 75 |
+| tie-aware pairwise accuracy | 0.198 | 0.104 |
+| Kendall-tau-b | -0.058 | -0.068 |
+| top-1 regret mean | `7.48e-4` | `4.10e-4` |
+
+在 validation 上对每个 state 随机打乱 candidate score 与 candidate return 的对应关系 100 次，得到 pairwise accuracy 均值 0.138、Kendall-tau-b 均值约 -0.001、top-1 regret 均值 `6.04e-4`。因此 0.104 不是“反向排序”的充分证据，主要反映模型把大量有效对预测为平局；但连训练集都未优于 zero predictor，表明下一步应优先排查 target 尺度、action/label 对齐和优化，而不是再延长训练或将责任归因于标签无效。
+
 离线产物：
 
 ```text
