@@ -93,6 +93,7 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
         track_hash = sha256(track_path)
     with h5py.File(episode, "r") as handle:
         times = np.asarray(handle["sim_times"], np.float64)
+        indices = _chunk_indices(len(times), control_step_stride)
         ee = np.asarray(handle["ee_state16"], np.float32)
         relations = np.asarray(handle["relations"], np.float32)
         nodes = np.asarray(handle["node_features"], np.float32)
@@ -100,8 +101,8 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
         roster = str(handle.attrs["node_roster_json"])
         task = str(handle.attrs["task"])
         # The cache itself does not copy RGB, but its paired RGB source is
-        # consumed later by the online-capable student.  Touch the final
-        # required frames now so a partially transferred/truncated HDF5 can
+        # consumed later by the online-capable student.  Touch every chunk
+        # boundary frame now so a partially transferred/truncated HDF5 can
         # never become an apparently valid teacher cache and fail only during
         # GPU training.
         if "rgb" not in handle:
@@ -109,7 +110,7 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
         for camera in ("head_camera", "right_camera"):
             if camera not in handle["rgb"] or len(handle["rgb"][camera]) != len(times):
                 raise ValueError(f"observer source has no time-aligned {camera} RGB")
-            _ = np.asarray(handle["rgb"][camera][-1], dtype=np.uint8)
+            _ = np.asarray(handle["rgb"][camera][indices], dtype=np.uint8)
     if len(times) != tracks.shape[1]:
         raise ValueError("SAM track length does not match oracle sidecar")
     if np.any(np.diff(times) <= 0):
@@ -121,7 +122,6 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
     rewards_raw[1:] = (success[1:] & ~success[:-1]).astype(np.float32)
     if len(rewards_raw) and success[0]:
         rewards_raw[0] = 1.0
-    indices = _chunk_indices(len(times), control_step_stride)
     # Coarse boundaries/rewards summarize the transition since the preceding
     # chunk boundary, whereas state/progress describe the current boundary.
     boundary = np.zeros(len(indices), np.float32)
