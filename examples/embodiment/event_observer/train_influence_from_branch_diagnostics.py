@@ -323,7 +323,7 @@ def main() -> None:
     best_metrics = history[int(np.argmin([row["validation_objective"] for row in history]))]
     payload["offline_influence_training"] = {
         "diagnostics": str(args.diagnostics), "states": int(len(outcomes)), "train_states": int((~validation).sum()),
-        "validation_states": int(validation.sum()), "best_validation_mse": best,
+        "validation_states": int(validation.sum()), "best_validation_objective": best,
         "best_epoch": int(np.argmin([row["validation_objective"] for row in history])),
         "diagnostic_settings": {
             "overfit_all_states": args.overfit_all_states, "normalized_target_loss": args.normalized_target_loss,
