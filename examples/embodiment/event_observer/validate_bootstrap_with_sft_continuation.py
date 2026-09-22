@@ -60,6 +60,15 @@ def _action_fingerprint(action: torch.Tensor) -> str:
     return hashlib.sha256(action.detach().cpu().contiguous().numpy().tobytes()).hexdigest()[:16]
 
 
+def _snapshot_fingerprint(snapshot: object) -> str:
+    """Record a reproducible identity hint without decoding simulator state."""
+    if isinstance(snapshot, bytes):
+        payload = snapshot
+    else:
+        payload = repr(snapshot).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
 def _sample_action(model: torch.nn.Module, obs: dict[str, torch.Tensor], seed: int) -> torch.Tensor:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -150,6 +159,8 @@ def main() -> None:
         for current_chunk in range(max(target_chunks) + 1):
             if current_chunk in target_chunks:
                 root = env.get_state(); root_history = list(history)
+                root_input_fingerprint = _endpoint_fingerprint(observation)
+                root_snapshot_fingerprint = _snapshot_fingerprint(root)
                 candidate_actions = [_sample_action(model, observation, args.seed + 1009 * current_chunk + candidate) for candidate in range(args.candidates)]
                 if args.duplicate_first_candidate:
                     candidate_actions[-1] = candidate_actions[0].clone()
@@ -209,7 +220,10 @@ def main() -> None:
                                 "bootstrap_absdiff": abs(branch_rows[left]["bootstrap_target"] - branch_rows[right]["bootstrap_target"]),
                                 "value_absdiff": abs(branch_rows[left]["endpoint_value_first"] - branch_rows[right]["endpoint_value_first"]),
                             })
-                reports.append({"chunk_index": current_chunk, "elapsed_control_steps": int(env.elapsed_steps[0]), "branches": branch_rows,
+                reports.append({"chunk_index": current_chunk, "elapsed_control_steps": int(env.elapsed_steps[0]),
+                                "root_input_fingerprint": root_input_fingerprint,
+                                "root_snapshot_fingerprint": root_snapshot_fingerprint,
+                                "branches": branch_rows,
                                 "repeat_controls": repeat_controls, "ranking": _rank_metrics(bootstrap, continuation, args.tie_eps)})
             if current_chunk == max(target_chunks):
                 break
