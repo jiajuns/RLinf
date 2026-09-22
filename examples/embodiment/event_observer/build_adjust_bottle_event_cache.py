@@ -137,12 +137,15 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
         proprio_derivative_unit=np.asarray("per_control_step"),
         # The two cameras are fused into a single frame feature vector.  Token
         # 2 identifies this fixed global+wrist fusion, not an embodiment/task.
-        mount_tokens=np.full(len(times), 2, np.int64),
+        # Every emitted field is indexed at the chunk boundary.  Keeping
+        # these at raw-frame length silently misaligns training examples when
+        # ``control_step_stride > 1`` (e.g. the 50-control-step π0.5 chunk).
+        mount_tokens=np.full(len(indices), 2, np.int64),
         posterior_target=posterior.astype(np.float32), state_target=state.astype(np.int64),
         boundary_target=boundary.astype(np.float32), progress_target=progress.astype(np.float32),
         geometric_relation_target=geometric.astype(np.float32),
         state_change_target=state_change.astype(np.float32),
-        valid_mask=np.ones(len(times), bool), rewards=rewards, dones=dones,
+        valid_mask=np.ones(len(indices), bool), rewards=rewards, dones=dones,
     )
 
 
