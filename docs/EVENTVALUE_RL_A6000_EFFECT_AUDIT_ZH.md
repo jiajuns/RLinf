@@ -354,6 +354,8 @@ R_{\mathrm{branch}}+\gamma G_{\mathrm{continuation}}.
 
 两种目标都能学到显著高于 statewise shuffle 的 held-out 排序；当前小数据下 state-centered MSE 略好，故它是后续不改架构时的首选。注意 validation 只来自一个 reset-seed group，53 个非标签平局 pair，不可作为最终泛化或 PPO 开启门槛；它只推翻了“Influence 连训练/held-out 排序都学不会”的旧判断。
 
+随后以四个现有 reset-seed group 做 leave-one-episode-group-out（LOEO）复核，state-centered MSE 的 held-out pairwise 为：seed 49 `0.774`、57 `0.600`、852 `0.481`、978 `0.768`；对应随机 score shuffle 约 `0.49–0.51`。seed 852 的 27 个高信号 state 仍近随机，故此前 seed-49 的结果不能概括为稳健泛化。当前数据只含 4 个相关 episode group，下一轮必须扩展独立 reset seed 和关键状态覆盖；不得因某一个 split 的 0.774 开启 PPO。
+
 ### 非零动作 snapshot repeat control
 
 为定位重复 label，`validate_bootstrap_with_sft_continuation.py` 新增了完全重复 action control、endpoint 分量 hash，以及对**同一份 endpoint 输入**连续两次 sidecar 推理的检查。结果为：

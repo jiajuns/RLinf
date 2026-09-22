@@ -196,6 +196,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--validation-fraction", type=float, default=.25)
+    parser.add_argument("--validation-groups", default="",
+                        help="Comma-separated reset-seed groups for an explicit episode-held-out diagnostic.")
     parser.add_argument("--tie-eps", type=float, default=1e-4)
     parser.add_argument("--label-tie-eps", type=float, default=None,
                         help="True-return tie threshold; defaults to --tie-eps for compatibility.")
@@ -236,7 +238,12 @@ def main() -> None:
         value[keep] for value in (representations, actions, outcomes, groups, repeat_noise, state_spread)
     )
     targets = outcomes - outcomes.mean(axis=1, keepdims=True)
-    validation = np.zeros(len(groups), dtype=bool) if args.overfit_all_states else _validation_mask(groups, args.validation_fraction)
+    explicit_validation_groups = [int(value) for value in args.validation_groups.split(",") if value]
+    validation = (
+        np.zeros(len(groups), dtype=bool) if args.overfit_all_states
+        else np.isin(groups, np.asarray(explicit_validation_groups, dtype=groups.dtype))
+        if explicit_validation_groups else _validation_mask(groups, args.validation_fraction)
+    )
     if not args.overfit_all_states and (not validation.any() or validation.all()):
         raise RuntimeError("invalid grouped train/validation split")
     payload = torch.load(args.sidecar, map_location="cpu", weights_only=False)
