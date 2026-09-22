@@ -122,6 +122,7 @@ def _markdown(report: dict[str, Any]) -> str:
         "",
         f"- files: {report['files']}",
         f"- states: {global_metrics['states']}",
+        f"- dropped states with incomplete candidate validity: {report['invalid_candidate_states']}",
         f"- candidates/state: {global_metrics.get('candidates_per_state', 0)}",
         f"- tie epsilon: {report['tie_eps']}",
         "",
@@ -134,6 +135,9 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- Kendall tau-b: {global_metrics['kendall_tau_b']}",
         f"- top-1 regret mean: {global_metrics['top1_regret'].get('mean')}",
         f"- predicted near-constant fraction: {global_metrics['predicted_near_constant_fraction']}",
+        f"- actual branch duration mean: {report['branch_duration_steps'].get('mean')}",
+        f"- bootstrap discount units mean: {report['bootstrap_discount_units'].get('mean')}",
+        f"- terminal / truncated candidate fraction: {report['terminal_candidate_fraction']} / {report['truncated_candidate_fraction']}",
         "",
         "## Per-event return spread",
         "",
@@ -173,25 +177,42 @@ def main() -> None:
         raise FileNotFoundError(f"no diagnostic artifacts under {args.diagnostic_dir}")
     returns, predictions, event_ids, success = [], [], [], []
     success_available = []
+    durations, discount_units, terminals, truncations = [], [], [], []
+    invalid_candidate_states = 0
     for path in files:
         with np.load(path, allow_pickle=False) as payload:
             true_values = np.asarray(payload["branch_returns"], dtype=np.float64)
             predicted_values = np.asarray(payload["predicted_scores"], dtype=np.float64)
             if true_values.ndim != 2 or true_values.shape != predicted_values.shape or true_values.shape[1] < 2:
                 raise ValueError(f"invalid candidate matrices in {path}")
-            returns.append(true_values)
-            predictions.append(predicted_values)
-            event_ids.append(np.asarray(payload["event_ids"]).reshape(-1))
+            valid = np.asarray(payload["candidate_valid_mask"], dtype=bool) if "candidate_valid_mask" in payload.files else np.ones_like(true_values, dtype=bool)
+            if valid.shape != true_values.shape:
+                raise ValueError(f"candidate_valid_mask is misaligned in {path}")
+            complete = valid.all(axis=1)
+            invalid_candidate_states += int((~complete).sum())
+            returns.append(true_values[complete])
+            predictions.append(predicted_values[complete])
+            event_ids.append(np.asarray(payload["event_ids"]).reshape(-1)[complete])
             # ``success_available`` was added with the persistent diagnostic
             # schema.  Treat legacy artifacts as unavailable rather than
             # rejecting an otherwise useful return/ranking audit.
-            success.append(np.asarray(payload["branch_success"], dtype=bool))
+            success.append(np.asarray(payload["branch_success"], dtype=bool)[complete])
+            if "actual_duration_steps" in payload.files:
+                durations.append(np.asarray(payload["actual_duration_steps"], dtype=np.float64)[complete])
+            if "bootstrap_discount_units" in payload.files:
+                discount_units.append(np.asarray(payload["bootstrap_discount_units"], dtype=np.float64)[complete])
+            if "branch_terminations" in payload.files:
+                terminals.append(np.asarray(payload["branch_terminations"], dtype=bool)[complete])
+            if "branch_truncations" in payload.files:
+                truncations.append(np.asarray(payload["branch_truncations"], dtype=bool)[complete])
             success_available.append(
                 bool(np.asarray(payload["success_available"]).item())
                 if "success_available" in payload.files
                 else False
             )
     true_values = np.concatenate(returns, axis=0)
+    if not len(true_values):
+        raise ValueError("all diagnostic states have invalid candidates")
     predicted_values = np.concatenate(predictions, axis=0)
     ids = np.concatenate(event_ids, axis=0)
     branch_success = np.concatenate(success, axis=0)
@@ -212,6 +233,11 @@ def main() -> None:
         "states": int(true_values.shape[0]),
         "tie_eps": args.tie_eps,
         "branch_success_available_for_all_files": bool(all(success_available)),
+        "invalid_candidate_states": invalid_candidate_states,
+        "branch_duration_steps": _summary(np.concatenate(durations) if durations else np.asarray([])),
+        "bootstrap_discount_units": _summary(np.concatenate(discount_units) if discount_units else np.asarray([])),
+        "terminal_candidate_fraction": float(np.concatenate(terminals).mean()) if terminals else None,
+        "truncated_candidate_fraction": float(np.concatenate(truncations).mean()) if truncations else None,
         "global": _metrics(true_values, predicted_values, args.tie_eps),
         "per_event": per_event,
         "success_strata": {

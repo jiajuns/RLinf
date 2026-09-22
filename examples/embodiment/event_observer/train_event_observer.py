@@ -191,8 +191,18 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=.99)
+    parser.add_argument(
+        "--proprio-time-delta", type=float, default=1.0,
+        help="Physical/control-step interval represented by adjacent cached Observer frames.",
+    )
+    parser.add_argument(
+        "--online-mount-token", type=int, default=2,
+        help="Mount token used by the fused online head/right-wrist RGB frontend.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    if args.proprio_time_delta <= 0:
+        raise ValueError("--proprio-time-delta must be positive")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     held_out = {task for task in args.holdout_tasks.split(",") if task}
     train = CachedEpisodes(args.cache, held_out, validation=False, episode_validation_fraction=args.episode_validation_fraction)
@@ -238,7 +248,12 @@ def main() -> None:
             best = score
             torch.save({"observer": observer.state_dict(), "event_value": critic.state_dict(), "feature_dim": feature_dim,
                         "posterior_dim": posterior_dim, "state_dim": state_dim, "geometric_dim": geometric_dim,
-                        "state_change_dim": state_change_dim, "metrics": metrics}, args.output / "best.pt")
+                        "state_change_dim": state_change_dim, "metrics": metrics,
+                        "online_input_contract": {
+                            "version": 1,
+                            "proprio_time_delta": args.proprio_time_delta,
+                            "mount_token": args.online_mount_token,
+                        }}, args.output / "best.pt")
 
 
 if __name__ == "__main__":

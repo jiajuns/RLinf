@@ -114,8 +114,8 @@ class RoboTwinEnv(gym.Env):
         """Legacy generic-snapshot alias; branches should prefer load_state."""
         self.load_state(state)
 
-    def branch_step(self, branch_actions: torch.Tensor, *, horizon: int) -> dict[str, torch.Tensor]:
-        """Evaluate short matched-state action branches without changing live state.
+    def branch_step(self, branch_actions: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Evaluate full action-chunk matched-state branches without live mutation.
 
         ``branch_actions`` is sampled by the π0.5 rollout worker from the
         same RGB observation using its configured Flow-SDE sampler.  Every
@@ -125,17 +125,42 @@ class RoboTwinEnv(gym.Env):
         """
         if branch_actions.ndim != 4:
             raise ValueError("branch_actions must be [batch,candidates,chunk,action_dim]")
-        if branch_actions.shape[0] != self.num_envs or not 1 <= horizon <= branch_actions.shape[2]:
-            raise ValueError("branch action batch/horizon is incompatible with RoboTwinEnv")
+        if branch_actions.shape[0] != self.num_envs or branch_actions.shape[2] < 1:
+            raise ValueError("branch action batch/full chunk is incompatible with RoboTwinEnv")
+        # A policy output, PPO reward, Event Value transition and simulator
+        # intervention now share one unit: the complete sampled action chunk.
+        # Executing a configurable prefix here made gamma exponents and credit
+        # granularity disagree with PPO's chunk-level objective.
+        requested_steps = int(branch_actions.shape[2])
+        state_ids = torch.stack(
+            (self.reset_state_ids.to(device=self.device, dtype=torch.long), self._elapsed_steps.to(torch.long)), dim=-1
+        ).detach().cpu()
         snapshot = self.get_state()
-        rewards, successes, main_images, wrist_images, measured_states = [], [], [], [], []
+        rewards, durations, successes, terminations, truncations = [], [], [], [], []
+        valid, main_images, wrist_images, measured_states = [], [], [], []
         try:
             for candidate_idx in range(branch_actions.shape[1]):
                 self.load_state(snapshot)
-                obs, reward, terminated, _truncated, infos = self.step(
-                    branch_actions[:, candidate_idx, :horizon], auto_reset=False
+                obs_list, chunk_rewards, chunk_terminations, chunk_truncations, infos_list = self.chunk_step(
+                    branch_actions[:, candidate_idx], auto_reset=False
+                )
+                obs = obs_list[-1]
+                infos = infos_list[-1]
+                # Match PPO's ``reward_type=chunk_level`` exactly: a branch
+                # reward is the sum of the complete chunk's token rewards.
+                reward = chunk_rewards.sum(dim=-1)
+                terminated = chunk_terminations.any(dim=-1)
+                truncated = chunk_truncations.any(dim=-1)
+                chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
+                actual_steps = torch.where(
+                    chunk_dones.any(dim=-1),
+                    chunk_dones.to(torch.long).argmax(dim=-1) + 1,
+                    torch.full((self.num_envs,), requested_steps, dtype=torch.long, device=chunk_dones.device),
                 )
                 rewards.append(reward.detach().cpu())
+                durations.append(actual_steps.detach().cpu())
+                terminations.append(terminated.detach().cpu())
+                truncations.append(truncated.detach().cpu())
                 # Prefer the task's explicit success predicate.  A terminal
                 # transition is retained as a conservative fallback for older
                 # RoboTwin task implementations that omit this field.
@@ -143,7 +168,8 @@ class RoboTwinEnv(gym.Env):
                 if success is None:
                     success = terminated
                 successes.append(torch.as_tensor(success, dtype=torch.bool).detach().cpu())
-                main_images.append(obs["main_images"].detach().cpu())
+                main = obs["main_images"]
+                main_images.append(main.detach().cpu())
                 wrist = obs.get("wrist_images")
                 if wrist is None:
                     raise RuntimeError("RoboTwin Event branches require wrist RGB")
@@ -152,16 +178,31 @@ class RoboTwinEnv(gym.Env):
                 if measured is None:
                     raise RuntimeError("RoboTwin Event branches require measured proprioception")
                 measured_states.append(measured.detach().cpu())
+                # A terminal endpoint is valid: its bootstrap is masked in
+                # the actor.  Invalid means the environment returned a
+                # non-finite transport value, not merely that it terminated.
+                valid.append(
+                    torch.isfinite(reward)
+                    & torch.isfinite(measured).all(dim=-1)
+                    & torch.isfinite(main.to(torch.float32)).flatten(1).all(dim=-1)
+                )
         finally:
             self.load_state(snapshot)
         candidates = branch_actions.shape[1]
         return {
             "branch_rewards": torch.stack(rewards, dim=1),
-            "branch_horizons": torch.full(
-                (self.num_envs, candidates), horizon, dtype=torch.long
+            # Historical name retained for sidecar backward compatibility;
+            # this is the *actual* action-step duration, never a prefix knob.
+            "branch_horizons": torch.stack(durations, dim=1),
+            "branch_requested_steps": torch.full(
+                (self.num_envs, candidates), requested_steps, dtype=torch.long
             ),
             "branch_mask": torch.ones(self.num_envs, dtype=torch.bool),
+            "branch_valid": torch.stack(valid, dim=1),
             "branch_success": torch.stack(successes, dim=1),
+            "branch_terminations": torch.stack(terminations, dim=1),
+            "branch_truncations": torch.stack(truncations, dim=1),
+            "branch_state_ids": state_ids,
             "branch_main_images": torch.stack(main_images, dim=1),
             "branch_wrist_images": torch.stack(wrist_images, dim=1),
             "branch_measured_state16": torch.stack(measured_states, dim=1),
@@ -435,7 +476,7 @@ class RoboTwinEnv(gym.Env):
 
         return extracted_obs, step_reward, terminations, truncations, infos
 
-    def chunk_step(self, chunk_actions):
+    def chunk_step(self, chunk_actions, *, auto_reset: bool | None = None):
         if isinstance(chunk_actions, torch.Tensor):
             chunk_actions = chunk_actions.cpu().numpy()
 
@@ -488,7 +529,8 @@ class RoboTwinEnv(gym.Env):
                     infos["episode"]["success_at_end"] = infos["success"].clone()
 
         past_dones = torch.logical_or(terminations, truncations)
-        if past_dones.any() and self.auto_reset:
+        should_auto_reset = self.auto_reset if auto_reset is None else bool(auto_reset)
+        if past_dones.any() and should_auto_reset:
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(
                 past_dones, obs_list[-1], infos_list[-1]
             )

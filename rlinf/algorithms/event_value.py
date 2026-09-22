@@ -62,7 +62,8 @@ class OnlineEventValueSidecar(nn.Module):
         event_value: EventValueCritic,
         rgb_student: RGBRoleFeatureStudent | None = None,
         *,
-        proprio_time_delta: float = 0.1,
+        proprio_time_delta: float = 1.0,
+        online_mount_token: int = 2,
         target_ema_decay: float = 0.995,
     ) -> None:
         super().__init__()
@@ -78,11 +79,27 @@ class OnlineEventValueSidecar(nn.Module):
         self.rgb_student = rgb_student
         if proprio_time_delta <= 0:
             raise ValueError("proprio_time_delta must be positive")
+        if not 0 <= online_mount_token < observer.mount_embedding.num_embeddings:
+            raise ValueError(
+                f"online_mount_token={online_mount_token} is outside the Observer mount vocabulary"
+            )
         self.proprio_time_delta = proprio_time_delta
+        # The RGB student emits one fused head/right-wrist feature per policy
+        # chunk.  Retaining the mount identity here avoids silently training
+        # with a camera token that differs from online PPO inference.
+        self.online_mount_token = int(online_mount_token)
         self.freeze_observer()
 
     @classmethod
-    def from_checkpoint(cls, path: str | Path, *, device: torch.device | str = "cpu") -> "OnlineEventValueSidecar":
+    def from_checkpoint(
+        cls,
+        path: str | Path,
+        *,
+        device: torch.device | str = "cpu",
+        proprio_time_delta: float | None = None,
+        online_mount_token: int | None = None,
+        require_input_contract: bool = True,
+    ) -> "OnlineEventValueSidecar":
         checkpoint = torch.load(Path(path), map_location=device, weights_only=True)
         required = {"observer", "event_value", "feature_dim", "posterior_dim", "state_dim", "geometric_dim", "state_change_dim"}
         missing = required.difference(checkpoint)
@@ -96,19 +113,70 @@ class OnlineEventValueSidecar(nn.Module):
         observer.load_state_dict(checkpoint["observer"])
         value = EventValueCritic(256)
         value.load_state_dict(checkpoint["event_value"])
-        return cls(observer, value).to(device)
+        contract = checkpoint.get("online_input_contract")
+        if contract is None and require_input_contract:
+            raise ValueError(
+                "Event Observer checkpoint has no online_input_contract. "
+                "Re-train/export it with proprio_time_delta and mount token metadata, "
+                "or explicitly use strict_input_contract=false only for legacy diagnostics."
+            )
+        contract = contract or {}
+        checkpoint_delta = contract.get("proprio_time_delta")
+        checkpoint_mount = contract.get("mount_token")
+        if proprio_time_delta is None:
+            proprio_time_delta = float(checkpoint_delta if checkpoint_delta is not None else 1.0)
+        if online_mount_token is None:
+            online_mount_token = int(checkpoint_mount if checkpoint_mount is not None else 2)
+        if checkpoint_delta is not None and float(checkpoint_delta) != float(proprio_time_delta):
+            raise ValueError("Observer checkpoint proprio_time_delta differs from online configuration")
+        if checkpoint_mount is not None and int(checkpoint_mount) != int(online_mount_token):
+            raise ValueError("Observer checkpoint mount token differs from online configuration")
+        return cls(
+            observer,
+            value,
+            proprio_time_delta=float(proprio_time_delta),
+            online_mount_token=int(online_mount_token),
+        ).to(device)
 
     @classmethod
     def from_checkpoints(
-        cls, event_checkpoint: str | Path, rgb_student_checkpoint: str | Path, *, device: torch.device | str = "cpu"
+        cls,
+        event_checkpoint: str | Path,
+        rgb_student_checkpoint: str | Path,
+        *,
+        device: torch.device | str = "cpu",
+        proprio_time_delta: float | None = None,
+        online_mount_token: int | None = None,
+        require_input_contract: bool = True,
     ) -> "OnlineEventValueSidecar":
         """Load a deployable RGB→Event Observer→Event Value sidecar."""
-        sidecar = cls.from_checkpoint(event_checkpoint, device=device)
+        sidecar = cls.from_checkpoint(
+            event_checkpoint,
+            device=device,
+            proprio_time_delta=proprio_time_delta,
+            online_mount_token=online_mount_token,
+            require_input_contract=require_input_contract,
+        )
         checkpoint = torch.load(Path(rgb_student_checkpoint), map_location=device, weights_only=True)
         if "rgb_student" not in checkpoint or int(checkpoint.get("feature_dim", -1)) != sidecar.observer.feature_dim:
             raise ValueError("RGB student checkpoint is incompatible with Event Observer feature_dim")
         student = RGBRoleFeatureStudent(sidecar.observer.feature_dim)
         student.load_state_dict(checkpoint["rgb_student"])
+        student_contract = checkpoint.get("online_input_contract")
+        if student_contract is None and require_input_contract:
+            raise ValueError(
+                "RGB student checkpoint has no online_input_contract. Re-train/export it "
+                "with the same chunk-time proprio/mount contract as the Observer."
+            )
+        student_contract = student_contract or {}
+        if student_contract.get("proprio_time_delta") is not None and float(
+            student_contract["proprio_time_delta"]
+        ) != float(sidecar.proprio_time_delta):
+            raise ValueError("RGB student proprio_time_delta differs from Event Observer contract")
+        if student_contract.get("mount_token") is not None and int(student_contract["mount_token"]) != int(
+            sidecar.online_mount_token
+        ):
+            raise ValueError("RGB student mount token differs from Event Observer contract")
         sidecar.rgb_student = student.to(device)
         for parameter in sidecar.rgb_student.parameters():
             parameter.requires_grad_(False)
@@ -143,13 +211,18 @@ class OnlineEventValueSidecar(nn.Module):
         """Run the online RGB student then the frozen Event Observer."""
         if self.rgb_student is None:
             raise RuntimeError("infer_images requires an RGB student checkpoint")
-        return self.infer(
-            self.rgb_student(
+        features = self.rgb_student(
                 head_images,
                 wrist_images,
-            measured_state16,
+                measured_state16,
             proprio_time_delta=self.proprio_time_delta,
-            ),
+        )
+        mount_tokens = torch.full(
+            features.shape[:2], self.online_mount_token, device=features.device, dtype=torch.long
+        )
+        return self.infer(
+            features,
+            mount_tokens,
             boundary_threshold=boundary_threshold,
             use_target_value=use_target_value,
         )

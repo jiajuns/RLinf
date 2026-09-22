@@ -61,13 +61,24 @@ class EnvOutput:
     # intentionally separated from ordinary observations so base πRL traffic
     # and memory remain unchanged.
     branch_rewards: Optional[torch.Tensor] = None  # [B, candidates]
+    # Actual simulator action-step duration for each full action-chunk branch.
+    # ``branch_horizons`` is retained as a backward-compatible transport name;
+    # it no longer denotes a configurable short prefix of a policy chunk.
     branch_horizons: Optional[torch.Tensor] = None  # [B, candidates]
+    branch_requested_steps: Optional[torch.Tensor] = None  # [B, candidates]
     branch_mask: Optional[torch.Tensor] = None  # [B]
+    branch_valid: Optional[torch.Tensor] = None  # [B, candidates]
     # Flow-SDE action chunks that generated the controlled branch outcomes.
     # They are transported only when the optional Event diagnostics path is
     # enabled; base PPO does not consume them.
     branch_actions: Optional[torch.Tensor] = None  # [B, candidates, action_chunk, action_dim]
     branch_success: Optional[torch.Tensor] = None  # [B, candidates]
+    branch_terminations: Optional[torch.Tensor] = None  # [B, candidates]
+    branch_truncations: Optional[torch.Tensor] = None  # [B, candidates]
+    # Stable lightweight identity of the cloned base state: reset seed and
+    # elapsed action steps.  It is for audit split/deduplication only, never
+    # an input to the policy or Observer.
+    branch_state_ids: Optional[torch.Tensor] = None  # [B, 2]
     branch_main_images: Optional[torch.Tensor] = None  # [B, candidates, H, W, 3]
     branch_wrist_images: Optional[torch.Tensor] = None  # [B, candidates, (W), H, W, 3]
     branch_measured_state16: Optional[torch.Tensor] = None  # [B, candidates, 16]
@@ -126,9 +137,14 @@ class EnvOutput:
         for name in (
             "branch_rewards",
             "branch_horizons",
+            "branch_requested_steps",
             "branch_mask",
+            "branch_valid",
             "branch_actions",
             "branch_success",
+            "branch_terminations",
+            "branch_truncations",
+            "branch_state_ids",
             "branch_main_images",
             "branch_wrist_images",
             "branch_measured_state16",
@@ -280,14 +296,29 @@ class EnvOutput:
             branch_horizons=_merge_optional_tensor_field(
                 "branch_horizons", allow_partial_none=True, fill_value=0
             ),
+            branch_requested_steps=_merge_optional_tensor_field(
+                "branch_requested_steps", allow_partial_none=True, fill_value=0
+            ),
             branch_mask=_merge_optional_tensor_field(
                 "branch_mask", allow_partial_none=True, fill_value=False
+            ),
+            branch_valid=_merge_optional_tensor_field(
+                "branch_valid", allow_partial_none=True, fill_value=False
             ),
             branch_actions=_merge_optional_tensor_field(
                 "branch_actions", allow_partial_none=True, fill_value=0.0
             ),
             branch_success=_merge_optional_tensor_field(
                 "branch_success", allow_partial_none=True, fill_value=False
+            ),
+            branch_terminations=_merge_optional_tensor_field(
+                "branch_terminations", allow_partial_none=True, fill_value=False
+            ),
+            branch_truncations=_merge_optional_tensor_field(
+                "branch_truncations", allow_partial_none=True, fill_value=False
+            ),
+            branch_state_ids=_merge_optional_tensor_field(
+                "branch_state_ids", allow_partial_none=True, fill_value=-1
             ),
             branch_main_images=_merge_optional_tensor_field(
                 "branch_main_images", allow_partial_none=True, fill_value=0
@@ -320,9 +351,14 @@ class EnvOutput:
             "oracle_event_progress": self.oracle_event_progress,
             "branch_rewards": self.branch_rewards,
             "branch_horizons": self.branch_horizons,
+            "branch_requested_steps": self.branch_requested_steps,
             "branch_mask": self.branch_mask,
+            "branch_valid": self.branch_valid,
             "branch_actions": self.branch_actions,
             "branch_success": self.branch_success,
+            "branch_terminations": self.branch_terminations,
+            "branch_truncations": self.branch_truncations,
+            "branch_state_ids": self.branch_state_ids,
             "branch_main_images": self.branch_main_images,
             "branch_wrist_images": self.branch_wrist_images,
             "branch_measured_state16": self.branch_measured_state16,
@@ -447,9 +483,14 @@ class ChunkStepResult:
     oracle_event_progress: torch.Tensor = None  # [B, action_chunk]
     branch_rewards: torch.Tensor = None
     branch_horizons: torch.Tensor = None
+    branch_requested_steps: torch.Tensor = None
     branch_mask: torch.Tensor = None
+    branch_valid: torch.Tensor = None
     branch_actions: torch.Tensor = None
     branch_success: torch.Tensor = None
+    branch_terminations: torch.Tensor = None
+    branch_truncations: torch.Tensor = None
+    branch_state_ids: torch.Tensor = None
     branch_main_images: torch.Tensor = None
     branch_wrist_images: torch.Tensor = None
     branch_measured_state16: torch.Tensor = None
@@ -480,9 +521,14 @@ class ChunkStepResult:
         for name in (
             "branch_rewards",
             "branch_horizons",
+            "branch_requested_steps",
             "branch_mask",
+            "branch_valid",
             "branch_actions",
             "branch_success",
+            "branch_terminations",
+            "branch_truncations",
+            "branch_state_ids",
             "branch_main_images",
             "branch_wrist_images",
             "branch_measured_state16",
@@ -517,9 +563,14 @@ class Trajectory:
     event_progress: torch.Tensor = None
     branch_rewards: torch.Tensor = None
     branch_horizons: torch.Tensor = None
+    branch_requested_steps: torch.Tensor = None
     branch_mask: torch.Tensor = None
+    branch_valid: torch.Tensor = None
     branch_actions: torch.Tensor = None
     branch_success: torch.Tensor = None
+    branch_terminations: torch.Tensor = None
+    branch_truncations: torch.Tensor = None
+    branch_state_ids: torch.Tensor = None
     branch_main_images: torch.Tensor = None
     branch_wrist_images: torch.Tensor = None
     branch_measured_state16: torch.Tensor = None

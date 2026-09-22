@@ -71,7 +71,7 @@ def main() -> None:
         initial_obs, _ = env.reset()
         if initial_obs.get("measured_state16") is None or initial_obs["measured_state16"].shape != (1, 16):
             raise AssertionError("RoboTwin online observer did not receive measured_state16")
-        branch = env.branch_step(torch.zeros((1, 2, 1, 14), dtype=torch.float32), horizon=1)
+        branch = env.branch_step(torch.zeros((1, 2, 1, 14), dtype=torch.float32))
         if not bool(branch["branch_mask"].all()) or branch["branch_measured_state16"].shape != (1, 2, 16):
             raise AssertionError("matched-state branch did not return measured state")
         snapshot = env.get_state()

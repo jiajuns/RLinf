@@ -60,11 +60,11 @@ def collate(rows: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Ten
     return torch.stack(head), torch.stack(wrist), torch.stack(measured_state16), torch.stack(target), torch.stack(mask)
 
 
-def evaluate(model: RGBRoleFeatureStudent, loader: DataLoader, device: torch.device) -> float:
+def evaluate(model: RGBRoleFeatureStudent, loader: DataLoader, device: torch.device, proprio_time_delta: float) -> float:
     model.eval(); total = count = 0.0
     with torch.no_grad():
         for head, wrist, measured_state16, target, mask in loader:
-            predicted = model(head.to(device), wrist.to(device), measured_state16.to(device))
+            predicted = model(head.to(device), wrist.to(device), measured_state16.to(device), proprio_time_delta=proprio_time_delta)
             error = (predicted - target.to(device)).abs()[mask.to(device)].mean()
             total += float(error); count += 1
     return total / max(count, 1)
@@ -79,9 +79,13 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--validation-fraction", type=float, default=.1)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--proprio-time-delta", type=float, default=1.0)
+    parser.add_argument("--online-mount-token", type=int, default=2)
     args = parser.parse_args()
     if not 0 < args.validation_fraction < 1:
         raise ValueError("validation fraction must be in (0,1)")
+    if args.proprio_time_delta <= 0:
+        raise ValueError("--proprio-time-delta must be positive")
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     train = CachedRGBEpisodes(args.cache, validation=False, fraction=args.validation_fraction)
     validation = CachedRGBEpisodes(args.cache, validation=True, fraction=args.validation_fraction)
@@ -96,16 +100,18 @@ def main() -> None:
     for epoch in range(args.epochs):
         model.train(); total = 0.0
         for head, wrist, measured_state16, target, mask in train_loader:
-            prediction = model(head.to(device), wrist.to(device), measured_state16.to(device))
+            prediction = model(head.to(device), wrist.to(device), measured_state16.to(device), proprio_time_delta=args.proprio_time_delta)
             loss = F.smooth_l1_loss(prediction[mask.to(device)], target.to(device)[mask.to(device)])
             optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
             total += float(loss.detach())
-        validation_mae = evaluate(model, val_loader, device)
+        validation_mae = evaluate(model, val_loader, device, args.proprio_time_delta)
         metrics = {"epoch": epoch, "train_huber": total / max(len(train_loader), 1), "val_teacher_feature_mae": validation_mae}
         print(json.dumps(metrics), flush=True)
         if validation_mae < best:
             best = validation_mae
-            torch.save({"rgb_student": model.state_dict(), "feature_dim": feature_dim, "metrics": metrics}, args.output / "best.pt")
+            torch.save({"rgb_student": model.state_dict(), "feature_dim": feature_dim, "metrics": metrics,
+                        "online_input_contract": {"version": 1, "proprio_time_delta": args.proprio_time_delta,
+                                                  "mount_token": args.online_mount_token}}, args.output / "best.pt")
 
 
 if __name__ == "__main__":

@@ -518,10 +518,10 @@ class EnvWorker(Worker):
                     "matched-state event branches require an environment with branch_step(); "
                     "RoboTwinEnv exposes it through SAPIEN snapshots"
                 )
-            branch_horizon = int(
-                self.cfg.algorithm.get("event_branch", {}).get("horizon", 10)
-            )
-            branch_payload = branch_step(branch_actions, horizon=branch_horizon)
+            # The intervention unit is one complete policy action chunk.  Do
+            # not apply a separate branch horizon: that would make branch
+            # return discounting inconsistent with chunk-level PPO and V_E.
+            branch_payload = branch_step(branch_actions)
             # Preserve the exact Flow-SDE candidates alongside their outcomes
             # for offline influence-ranking diagnostics.  These stay out of
             # ordinary PPO unless Event diagnostics are explicitly enabled.
@@ -548,7 +548,13 @@ class EnvWorker(Worker):
                 "branch_horizons": torch.zeros(
                     (branch_batch_size, branch_candidates), dtype=torch.long
                 ),
+                "branch_requested_steps": torch.zeros(
+                    (branch_batch_size, branch_candidates), dtype=torch.long
+                ),
                 "branch_mask": torch.zeros(branch_batch_size, dtype=torch.bool),
+                "branch_valid": torch.zeros(
+                    (branch_batch_size, branch_candidates), dtype=torch.bool
+                ),
                 "branch_actions": torch.zeros(
                     (
                         branch_batch_size,
@@ -565,6 +571,15 @@ class EnvWorker(Worker):
                 ),
                 "branch_success": torch.zeros(
                     (branch_batch_size, branch_candidates), dtype=torch.bool
+                ),
+                "branch_terminations": torch.zeros(
+                    (branch_batch_size, branch_candidates), dtype=torch.bool
+                ),
+                "branch_truncations": torch.zeros(
+                    (branch_batch_size, branch_candidates), dtype=torch.bool
+                ),
+                "branch_state_ids": torch.full(
+                    (branch_batch_size, 2), -1, dtype=torch.long
                 ),
                 "branch_main_images": torch.zeros(
                     (branch_batch_size, branch_candidates, *extracted_obs["main_images"].shape[1:]),
@@ -1270,9 +1285,14 @@ class EnvWorker(Worker):
                         oracle_event_progress=env_output.oracle_event_progress,
                         branch_rewards=env_output.branch_rewards,
                         branch_horizons=env_output.branch_horizons,
+                        branch_requested_steps=env_output.branch_requested_steps,
                         branch_mask=env_output.branch_mask,
+                        branch_valid=env_output.branch_valid,
                         branch_actions=env_output.branch_actions,
                         branch_success=env_output.branch_success,
+                        branch_terminations=env_output.branch_terminations,
+                        branch_truncations=env_output.branch_truncations,
+                        branch_state_ids=env_output.branch_state_ids,
                         branch_main_images=env_output.branch_main_images,
                         branch_wrist_images=env_output.branch_wrist_images,
                         branch_measured_state16=env_output.branch_measured_state16,
@@ -1433,9 +1453,14 @@ class EnvWorker(Worker):
                     oracle_event_progress=env_output.oracle_event_progress,
                     branch_rewards=env_output.branch_rewards,
                     branch_horizons=env_output.branch_horizons,
+                    branch_requested_steps=env_output.branch_requested_steps,
                     branch_mask=env_output.branch_mask,
+                    branch_valid=env_output.branch_valid,
                     branch_actions=env_output.branch_actions,
                     branch_success=env_output.branch_success,
+                    branch_terminations=env_output.branch_terminations,
+                    branch_truncations=env_output.branch_truncations,
+                    branch_state_ids=env_output.branch_state_ids,
                     branch_main_images=env_output.branch_main_images,
                     branch_wrist_images=env_output.branch_wrist_images,
                     branch_measured_state16=env_output.branch_measured_state16,

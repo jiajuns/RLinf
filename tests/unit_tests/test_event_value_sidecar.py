@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from rlinf.algorithms.event_value import (
     OnlineEventValueSidecar,
@@ -35,6 +36,36 @@ def test_event_sidecar_can_use_a_frozen_rgb_student_online():
         torch.randint(0, 255, (1, 2, 40, 40, 3), dtype=torch.uint8),
     )
     assert output.values.shape == (1, 2)
+
+
+def test_deployable_sidecar_requires_matching_chunk_input_contract(tmp_path):
+    """Offline checkpoints must declare the same online delta/mount inputs."""
+    observer = EventObserver(5, 3, 4, num_geometric_primitives=2, num_state_change_primitives=1)
+    value = EventValueCritic(256)
+    student = RGBRoleFeatureStudent(5)
+    contract = {"version": 1, "proprio_time_delta": 50.0, "mount_token": 2}
+    observer_path = tmp_path / "observer.pt"
+    student_path = tmp_path / "student.pt"
+    torch.save(
+        {
+            "observer": observer.state_dict(), "event_value": value.state_dict(),
+            "feature_dim": 5, "posterior_dim": 3, "state_dim": 4,
+            "geometric_dim": 2, "state_change_dim": 1,
+            "online_input_contract": contract,
+        }, observer_path,
+    )
+    torch.save(
+        {"rgb_student": student.state_dict(), "feature_dim": 5, "online_input_contract": contract},
+        student_path,
+    )
+    sidecar = OnlineEventValueSidecar.from_checkpoints(
+        observer_path, student_path, proprio_time_delta=50.0, online_mount_token=2
+    )
+    assert sidecar.proprio_time_delta == 50.0 and sidecar.online_mount_token == 2
+    with pytest.raises(ValueError, match="proprio_time_delta"):
+        OnlineEventValueSidecar.from_checkpoints(
+            observer_path, student_path, proprio_time_delta=1.0, online_mount_token=2
+        )
 
 
 def test_rgb_student_consumes_measured_proprioception_causally():

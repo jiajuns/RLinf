@@ -85,11 +85,11 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
   "${sidecar_resume_args[@]}" \
   +algorithm.event_sidecar.target_ema_decay=0.995 \
-  +algorithm.event_sidecar.proprio_time_delta=5.0 +algorithm.event_sidecar.value_lr="${ROBOTWIN_EVENT_VALUE_LR}" \
+  +algorithm.event_sidecar.proprio_time_delta=50.0 +algorithm.event_sidecar.online_mount_token=2 +algorithm.event_sidecar.strict_input_contract=true +algorithm.event_sidecar.value_lr="${ROBOTWIN_EVENT_VALUE_LR}" \
   +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 \
-  +algorithm.event_branch.horizon=10 +algorithm.event_branch.min_supervision=500 \
+  +algorithm.event_branch.execution_unit=full_action_chunk +algorithm.event_branch.min_supervision=500 \
   +algorithm.event_branch.influence_lr=1.0e-4 \
-  +algorithm.event_credit.granularity=chunk +algorithm.event_credit.max_lambda=0.0 \
+  +algorithm.event_credit.granularity=chunk +algorithm.event_credit.max_lambda=0.0 +algorithm.event_credit.require_ranking_validation=true +algorithm.event_credit.ranking_validation_passed=false \
   +algorithm.event_credit.min_supervision_for_actor=999999 \
   +algorithm.event_credit.influence_beta=0.02 +algorithm.event_credit.influence_clip=3.0 \
   "${diagnostic_args[@]}" \

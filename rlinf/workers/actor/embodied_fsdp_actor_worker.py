@@ -15,6 +15,7 @@
 import numpy as np
 from pathlib import Path
 import torch
+import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
@@ -162,8 +163,21 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             if isinstance(self.device, int)
             else torch.device(self.device)
         )
+        # One observer output represents one *complete* π0.5 action chunk.
+        # This contract is checkpointed by both offline trainers and checked
+        # at load time; it prevents a raw-control-step proprio derivative
+        # from being silently used for a chunk-boundary online sequence.
+        proprio_time_delta = float(
+            sidecar_cfg.get("proprio_time_delta", self.cfg.actor.model.num_action_chunks)
+        )
+        online_mount_token = int(sidecar_cfg.get("online_mount_token", 2))
         self._event_sidecar = OnlineEventValueSidecar.from_checkpoints(
-            observer_checkpoint, rgb_student_checkpoint, device=sidecar_device
+            observer_checkpoint,
+            rgb_student_checkpoint,
+            device=sidecar_device,
+            proprio_time_delta=proprio_time_delta,
+            online_mount_token=online_mount_token,
+            require_input_contract=bool(sidecar_cfg.get("strict_input_contract", True)),
         )
         target_ema = float(sidecar_cfg.get("target_ema_decay", 0.995))
         if not 0.0 <= target_ema < 1.0:
@@ -199,8 +213,18 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         resume_path = sidecar_cfg.get("resume_sidecar_path", None)
         if resume_path:
             payload = torch.load(Path(resume_path), map_location=sidecar_device, weights_only=False)
-            if payload.get("format") != "eventvalue_rl_sidecars_v1":
+            if payload.get("format") not in {"eventvalue_rl_sidecars_v1", "eventvalue_rl_sidecars_v2"}:
                 raise ValueError("event sidecar resume checkpoint has an unsupported format")
+            if payload.get("time_unit", "full_action_chunk") != "full_action_chunk":
+                raise ValueError("cannot resume a sidecar trained on a non-chunk time unit")
+            if payload.get("proprio_time_delta") is not None and float(payload["proprio_time_delta"]) != float(
+                self._event_sidecar.proprio_time_delta
+            ):
+                raise ValueError("resume sidecar proprio_time_delta differs from current online contract")
+            if payload.get("online_mount_token") is not None and int(payload["online_mount_token"]) != int(
+                self._event_sidecar.online_mount_token
+            ):
+                raise ValueError("resume sidecar mount token differs from current online contract")
             self._event_sidecar.event_value.load_state_dict(payload["event_value"])
             self._event_sidecar.target_event_value.load_state_dict(
                 payload.get("target_event_value", payload["event_value"])
@@ -211,6 +235,51 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 self._event_influence_model.load_state_dict(payload["influence_model"])
             if self._event_influence_optimizer is not None and payload.get("influence_optimizer") is not None:
                 self._event_influence_optimizer.load_state_dict(payload["influence_optimizer"])
+            if payload.get("event_value_optimizer") is not None:
+                self._event_value_optimizer.load_state_dict(payload["event_value_optimizer"])
+                self._move_optimizer_state_to_device(self._event_value_optimizer, sidecar_device)
+            if self._event_influence_optimizer is not None:
+                self._move_optimizer_state_to_device(self._event_influence_optimizer, sidecar_device)
+        # All FSDP ranks must start the sidecars identically.  In particular
+        # the Influence MLP is freshly randomized on every rank otherwise.
+        self._synchronize_event_sidecars_from_rank0()
+
+    @staticmethod
+    def _move_optimizer_state_to_device(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
+        """Move deserialised Adam moments back to the sidecar device."""
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to(device)
+
+    def _event_sidecar_distributed(self) -> bool:
+        return self._world_size > 1 and dist.is_available() and dist.is_initialized()
+
+    def _synchronize_event_sidecars_from_rank0(self) -> None:
+        """Broadcast auxiliary modules after init/resume, never actor weights."""
+        if not self._event_sidecar_distributed() or self._event_sidecar is None:
+            return
+        modules: list[nn.Module] = [self._event_sidecar.event_value, self._event_sidecar.target_event_value]
+        if self._event_influence_model is not None:
+            modules.append(self._event_influence_model)
+        for module in modules:
+            for tensor in list(module.parameters()) + list(module.buffers()):
+                dist.broadcast(tensor.data, src=0)
+
+    def _all_reduce_auxiliary_gradients(self, module: nn.Module) -> None:
+        """Average sidecar gradients so every rank takes the same Adam step."""
+        if not self._event_sidecar_distributed():
+            return
+        for parameter in module.parameters():
+            if parameter.grad is not None:
+                dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
+                parameter.grad.div_(self._world_size)
+
+    def _global_auxiliary_count(self, local_count: int, device: torch.device) -> int:
+        count = torch.tensor(int(local_count), dtype=torch.long, device=device)
+        if self._event_sidecar_distributed():
+            dist.all_reduce(count, op=dist.ReduceOp.SUM)
+        return int(count.item())
 
     def _event_action_tensor(
         self, *, chunks: int, batch: int, action_chunk: int, device: torch.device
@@ -244,6 +313,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         not accidentally skip the safety warm-up.
         """
         cfg = self.cfg.algorithm.get("event_credit", {})
+        # Matched-state labels alone are not enough: a small MSE can be the
+        # zero predictor when branch returns are tied.  A held-out diagnostic
+        # must explicitly certify ranking before Event credit can affect PPO.
+        if bool(cfg.get("require_ranking_validation", True)) and not bool(
+            cfg.get("ranking_validation_passed", False)
+        ):
+            return 0.0
         required_labels = int(cfg.get("min_supervision_for_actor", 0))
         if self._event_branch_supervision_count < required_labels:
             return 0.0
@@ -263,6 +339,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         branch_returns: torch.Tensor,
         predicted_scores: torch.Tensor,
         branch_mask: torch.Tensor,
+        branch_valid: torch.Tensor,
+        branch_rewards: torch.Tensor,
+        branch_bootstrap_values: torch.Tensor,
+        branch_discounted_bootstrap: torch.Tensor,
+        branch_discount_units: torch.Tensor,
+        branch_horizons: torch.Tensor,
+        branch_requested_steps: torch.Tensor,
+        branch_terminations: torch.Tensor,
+        branch_truncations: torch.Tensor,
+        branch_state_ids: torch.Tensor,
+        branch_actions: torch.Tensor,
     ) -> None:
         """Persist raw matched-state branch diagnostics for offline auditing.
 
@@ -280,6 +367,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             raise RuntimeError("diagnostic prediction and branch-return shapes must match")
         if branch_mask.shape != branch_returns.shape[:2]:
             raise RuntimeError("diagnostic branch mask is not aligned to branch returns")
+        if branch_valid.shape != branch_returns.shape:
+            raise RuntimeError("diagnostic valid-sample mask is not aligned to branch returns")
+        if branch_state_ids.shape != (*branch_returns.shape[:2], 2):
+            raise RuntimeError("diagnostic cloned-state identity must be [chunks,batch,2]")
         selected = branch_mask.bool()
         if not bool(selected.any()):
             return
@@ -327,6 +418,21 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             path,
             branch_returns=branch_returns[selected].detach().float().cpu().numpy(),
             predicted_scores=predicted_scores[selected].detach().float().cpu().numpy(),
+            candidate_actions=branch_actions[selected].detach().float().cpu().numpy(),
+            candidate_valid_mask=branch_valid[selected].detach().cpu().numpy(),
+            branch_rewards=branch_rewards[selected].detach().float().cpu().numpy(),
+            branch_bootstrap_values=branch_bootstrap_values[selected].detach().float().cpu().numpy(),
+            branch_discounted_bootstrap=branch_discounted_bootstrap[selected].detach().float().cpu().numpy(),
+            bootstrap_discount_units=branch_discount_units[selected].detach().cpu().numpy(),
+            actual_duration_steps=branch_horizons[selected].detach().cpu().numpy(),
+            requested_duration_steps=branch_requested_steps[selected].detach().cpu().numpy(),
+            branch_terminations=branch_terminations[selected].detach().cpu().numpy(),
+            branch_truncations=branch_truncations[selected].detach().cpu().numpy(),
+            state_ids=branch_state_ids[selected].detach().cpu().numpy(),
+            # Files contain only selected valid branch states; retain an
+            # explicit row mask so downstream readers need not infer that
+            # contract from filename conventions.
+            supervision_mask=np.ones(int(selected.sum().item()), dtype=np.bool_),
             event_ids=event_ids[selected].detach().cpu().numpy(),
             branch_success=branch_success[selected].detach().cpu().numpy(),
             success_available=np.asarray(success_available, dtype=np.bool_),
@@ -377,6 +483,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         required_branch_fields = (
             "branch_rewards",
             "branch_horizons",
+            "branch_requested_steps",
+            "branch_valid",
+            "branch_terminations",
+            "branch_truncations",
+            "branch_state_ids",
             "branch_main_images",
             "branch_wrist_images",
         )
@@ -398,18 +509,41 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
                 branch_rewards = self.rollout_batch["branch_rewards"].to(device)
                 branch_horizons = self.rollout_batch["branch_horizons"].to(device)
+                branch_requested_steps = self.rollout_batch["branch_requested_steps"].to(device)
+                branch_valid = self.rollout_batch["branch_valid"].to(device).bool()
+                branch_terminations = self.rollout_batch["branch_terminations"].to(device).bool()
+                branch_truncations = self.rollout_batch["branch_truncations"].to(device).bool()
+                branch_state_ids = self.rollout_batch["branch_state_ids"].to(device)
                 if branch_rewards.shape != future_values.shape or branch_horizons.shape != future_values.shape:
                     raise RuntimeError("branch return tensors are inconsistent")
-                branch_returns = branch_rewards + torch.pow(
+                if branch_requested_steps.shape != branch_rewards.shape or branch_valid.shape != branch_rewards.shape:
+                    raise RuntimeError("branch duration/valid masks are inconsistent")
+                terminal = torch.logical_or(branch_terminations, branch_truncations)
+                # The SMDP/PPO clock is chunks, not raw controller ticks:
+                # one candidate executes one complete action chunk and hence
+                # advances the bootstrap by exactly one RL time unit.  Raw
+                # action-step duration remains recorded for simulator audit,
+                # but must not turn a chunk-level gamma into gamma**50.
+                branch_discount_units = torch.ones_like(branch_horizons)
+                discount = torch.pow(
                     torch.as_tensor(float(self.cfg.algorithm.get("gamma", 1.0)), device=device),
-                    branch_horizons,
-                ) * future_values
+                    branch_discount_units,
+                )
+                # A terminal branch owns no successor bootstrap.  Persist all
+                # three terms below so an audit can reconstruct this target.
+                branch_bootstrap = torch.where(terminal, torch.zeros_like(future_values), future_values)
+                discounted_bootstrap = discount * branch_bootstrap
+                branch_returns = branch_rewards + discounted_bootstrap
                 # Candidate 0 is the executed Flow-SDE trajectory.  Centering
                 # across matched candidates preserves beneficial and harmful
                 # signs in the signed Event-SMDP allocator.
-                target = branch_returns[..., 0] - branch_returns.mean(dim=-1)
+                valid_count = branch_valid.sum(dim=-1)
+                matched_mean = (branch_returns * branch_valid).sum(dim=-1) / valid_count.clamp_min(1)
+                target = branch_returns[..., 0] - matched_mean
+                supervision_mask = mask & branch_valid[..., 0] & (valid_count >= 2)
                 direct_prediction = chunk_prediction if granularity == "chunk" else prediction[..., 0]
-                influence_loss = EventInfluenceModel.loss(direct_prediction, target, mask)
+                if bool(supervision_mask.any()):
+                    influence_loss = EventInfluenceModel.loss(direct_prediction, target, supervision_mask)
                 branch_actions = self.rollout_batch.get("branch_actions")
                 if branch_actions is not None and granularity == "chunk":
                     # Every candidate is scored with the same state/event
@@ -436,6 +570,17 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         branch_returns=branch_returns,
                         predicted_scores=candidate_scores,
                         branch_mask=mask,
+                        branch_valid=branch_valid,
+                        branch_rewards=branch_rewards,
+                        branch_bootstrap_values=branch_bootstrap,
+                        branch_discounted_bootstrap=discounted_bootstrap,
+                        branch_discount_units=branch_discount_units,
+                        branch_horizons=branch_horizons,
+                        branch_requested_steps=branch_requested_steps,
+                        branch_terminations=branch_terminations,
+                        branch_truncations=branch_truncations,
+                        branch_state_ids=branch_state_ids,
+                        branch_actions=self.rollout_batch["branch_actions"].to(device),
                     )
                 elif self.cfg.algorithm.get("event_diagnostics", {}).get("output_dir", None):
                     raise RuntimeError(
@@ -445,13 +590,18 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 record_only = bool(
                     self.cfg.algorithm.get("event_diagnostics", {}).get("record_only", False)
                 )
-                if not record_only:
+                if not record_only and influence_loss is not None:
                     self._event_influence_optimizer.zero_grad(set_to_none=True)
                     influence_loss.backward()
+                    self._all_reduce_auxiliary_gradients(self._event_influence_model)
                     torch.nn.utils.clip_grad_norm_(self._event_influence_model.parameters(), 1.0)
                     self._event_influence_optimizer.step()
-                    self._event_branch_supervision_count += int(mask.sum().item())
-                    self._event_branch_outcome_count += int(mask.sum().item() * branch_returns.shape[-1])
+                    self._event_branch_supervision_count += self._global_auxiliary_count(
+                        int(supervision_mask.sum().item()), device
+                    )
+                    self._event_branch_outcome_count += self._global_auxiliary_count(
+                        int(branch_valid[mask].sum().item()), device
+                    )
 
         minimum = int(self.cfg.algorithm.get("event_branch", {}).get("min_supervision", 1))
         if self._event_branch_supervision_count < minimum:
@@ -516,22 +666,24 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self.rollout_batch["intervention_influence"] = influence.to(
             dtype=self.rollout_batch["event_values"].dtype
         )
-        action_rewards = rewards.to(sidecar_device).transpose(1, 2).reshape(chunks * action_chunk, batch)
-        action_dones = dones.to(sidecar_device).transpose(1, 2).reshape((chunks + 1) * action_chunk, batch)[
-            -(chunks * action_chunk + 1) :
-        ]
-        action_ids = sidecar_rollout.event_ids.transpose(1, 2).reshape(
-            chunks * action_chunk, batch
-        )
+        # PPO has already declared a complete sampled π0.5 action chunk to be
+        # one reward/terminal/GAE transition (reward_type=chunk_level).  V_E
+        # must use that identical clock, not expand it back into 50 pseudo
+        # transitions.  This makes the SMDP duration and branch gamma exponent
+        # directly comparable.
+        chunk_rewards = rewards.to(sidecar_device).sum(dim=-1)
+        chunk_dones = dones.to(sidecar_device).max(dim=-1).values
+        chunk_event_ids = sidecar_rollout.event_ids[..., 0]
         self._event_value_optimizer.zero_grad(set_to_none=True)
         loss = self._event_sidecar.smdp_value_loss(
-            sidecar_rollout.action_representation,
-            action_rewards,
-            action_dones,
-            action_ids,
+            sidecar_rollout.chunk_output.representation,
+            chunk_rewards,
+            chunk_dones,
+            chunk_event_ids,
             gamma=float(self.cfg.algorithm.get("gamma", 1.0)),
         )
         loss.backward()
+        self._all_reduce_auxiliary_gradients(self._event_sidecar.event_value)
         torch.nn.utils.clip_grad_norm_(self._event_sidecar.event_value.parameters(), 1.0)
         self._event_value_optimizer.step()
         self._event_sidecar.update_target_event_value()
@@ -554,7 +706,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self._event_sidecar is None or self._rank != 0:
             return
         payload: dict[str, object] = {
-            "format": "eventvalue_rl_sidecars_v1",
+            "format": "eventvalue_rl_sidecars_v2",
             "event_value": self._event_sidecar.event_value.state_dict(),
             "target_event_value": self._event_sidecar.target_event_value.state_dict(),
             "observer": self._event_sidecar.observer.state_dict(),
@@ -564,6 +716,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 else None
             ),
             "proprio_time_delta": self._event_sidecar.proprio_time_delta,
+            "online_mount_token": self._event_sidecar.online_mount_token,
+            "time_unit": "full_action_chunk",
+            "event_value_optimizer": self._event_value_optimizer.state_dict()
+            if self._event_value_optimizer is not None
+            else None,
             "branch_supervision_count": self._event_branch_supervision_count,
             "branch_outcome_count": self._event_branch_outcome_count,
         }
