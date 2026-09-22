@@ -72,7 +72,14 @@ def make_features(
 def _chunk_indices(steps: int, stride: int) -> np.ndarray:
     if steps < 1 or stride < 1:
         raise ValueError("episode length and control-step stride must be positive")
-    return np.arange(0, steps, stride, dtype=np.int64)
+    indices = np.arange(0, steps, stride, dtype=np.int64)
+    # A success/terminal label often occurs in a short final chunk.  Dropping
+    # that frame loses the only sparse reward in many expert episodes and
+    # makes a non-divisible trajectory look as if it ended normally at the
+    # previous full chunk boundary.
+    if indices[-1] != steps - 1:
+        indices = np.append(indices, np.int64(steps - 1))
+    return indices
 
 
 def convert(episode: Path, track_path: Path, output: Path, *, control_step_stride: int = 1) -> None:
