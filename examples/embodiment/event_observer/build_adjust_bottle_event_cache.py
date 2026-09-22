@@ -133,7 +133,8 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
     # rate: accepting it would silently train the Observer on mismatched
     # feature/label pairs.
     chunk_fields = {
-        "tracks": tracks,
+        # Tracks are camera-major; all other fields are time-major.
+        "tracks": tracks.shape[1],
         "ee_state16": ee,
         "posterior": posterior,
         "state": state,
@@ -144,7 +145,11 @@ def convert(episode: Path, track_path: Path, output: Path, *, control_step_strid
         "rewards": rewards,
         "dones": dones,
     }
-    wrong = {name: len(value) for name, value in chunk_fields.items() if len(value) != len(indices)}
+    field_lengths = {
+        name: (int(value) if isinstance(value, (int, np.integer)) else len(value))
+        for name, value in chunk_fields.items()
+    }
+    wrong = {name: length for name, length in field_lengths.items() if length != len(indices)}
     if wrong:
         raise RuntimeError(f"chunk cache fields are misaligned: expected {len(indices)}, got {wrong}")
     output.parent.mkdir(parents=True, exist_ok=True)
