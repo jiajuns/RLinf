@@ -55,7 +55,9 @@ export ROBOTWIN_PPO_UPDATE_EPOCHS="${ROBOTWIN_PPO_UPDATE_EPOCHS:-5}"
 # Record-only branch collection never resumes the π0.5 actor; persisting a
 # full FSDP checkpoint (~20 GB) per short diagnostic job only exhausts the
 # A6000 data disk.  A caller can still opt in explicitly for training runs.
-export ROBOTWIN_SAVE_INTERVAL="${ROBOTWIN_SAVE_INTERVAL:-999999}"
+# ``check_progress`` treats the final epoch as a save point irrespective of a
+# positive interval.  Zero is its documented disabled value.
+export ROBOTWIN_SAVE_INTERVAL="${ROBOTWIN_SAVE_INTERVAL:-0}"
 export ROBOTWIN_ACTION_CHUNK="${ROBOTWIN_ACTION_CHUNK:-50}"
 export ROBOTWIN_BRANCH_INTERVAL="${ROBOTWIN_BRANCH_INTERVAL:-10}"
 export ROBOTWIN_EVENT_VALUE_LR="${ROBOTWIN_EVENT_VALUE_LR:-0.0}"
