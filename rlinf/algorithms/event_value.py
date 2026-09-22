@@ -17,7 +17,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from rlinf.algorithms.event_credit import event_smdp_credit
 from rlinf.models.embodiment.event_observer import EventObserver, EventValueCritic, RGBRoleFeatureStudent
 
 
@@ -51,6 +50,74 @@ class EventSidecarRollout:
     event_values: torch.Tensor
     action_representation: torch.Tensor
     chunk_output: EventSidecarOutput
+
+
+def event_boundary_value_targets(
+    rewards: torch.Tensor,
+    terminations: torch.Tensor,
+    truncations: torch.Tensor,
+    event_ids: torch.Tensor,
+    target_values: torch.Tensor,
+    *,
+    gamma: float,
+    bootstrap_on_truncation: bool,
+    valid_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Construct independent multi-step Event Value targets at chunk scale.
+
+    This is deliberately *not* :func:`event_smdp_credit`: PPO credit assigns
+    one event advantage across an event, whereas a value at every internal
+    chunk must regress its own remaining discounted reward to the next event
+    boundary.  ``terminations`` and ``truncations`` are `[T+1,B]`; their
+    separation makes the bootstrap rule explicit and matchable to PPO.
+    """
+    if rewards.ndim != 2 or event_ids.shape != rewards.shape:
+        raise ValueError("rewards and event_ids must be [time,batch]")
+    steps, batch = rewards.shape
+    expected = (steps + 1, batch)
+    if terminations.shape != expected or truncations.shape != expected or target_values.shape != expected:
+        raise ValueError("Event Value terminal/target tensors must be [time+1,batch]")
+    if not 0 < gamma <= 1:
+        raise ValueError("gamma must be in (0,1]")
+    if valid_mask is None:
+        valid_mask = torch.ones_like(rewards, dtype=torch.bool)
+    if valid_mask.shape != rewards.shape:
+        raise ValueError("valid_mask must be [time,batch]")
+
+    targets = torch.zeros_like(rewards)
+    valid = valid_mask.bool() & (event_ids >= 0)
+    for batch_idx in range(batch):
+        start = 0
+        while start < steps:
+            if not bool(valid[start, batch_idx]):
+                start += 1
+                continue
+            event = event_ids[start, batch_idx]
+            end = start + 1
+            # A contiguous event ends at a learned boundary, invalid/padded
+            # step, or environment end.  ``end`` indexes the successor state.
+            while (
+                end < steps
+                and bool(valid[end, batch_idx])
+                and event_ids[end, batch_idx] == event
+                and not bool(terminations[end, batch_idx] | truncations[end, batch_idx])
+            ):
+                end += 1
+            for time_idx in range(start, end):
+                duration = end - time_idx
+                discounts = rewards.new_tensor(gamma).pow(
+                    torch.arange(duration, device=rewards.device)
+                )
+                remaining_reward = (discounts * rewards[time_idx:end, batch_idx]).sum()
+                is_terminated = bool(terminations[end, batch_idx])
+                is_truncated = bool(truncations[end, batch_idx])
+                allow_bootstrap = not is_terminated and (
+                    bootstrap_on_truncation or not is_truncated
+                )
+                bootstrap = target_values[end, batch_idx] if allow_bootstrap else remaining_reward.new_zeros(())
+                targets[time_idx, batch_idx] = remaining_reward + (gamma**duration) * bootstrap
+            start = end
+    return targets, valid
 
 
 class OnlineEventValueSidecar(nn.Module):
@@ -121,6 +188,11 @@ class OnlineEventValueSidecar(nn.Module):
                 "or explicitly use strict_input_contract=false only for legacy diagnostics."
             )
         contract = contract or {}
+        if require_input_contract and (
+            contract.get("control_step_stride") is None
+            or contract.get("proprio_derivative_unit") != "per_control_step"
+        ):
+            raise ValueError("Event Observer checkpoint lacks a per-control-step chunk input contract")
         checkpoint_delta = contract.get("proprio_time_delta")
         checkpoint_mount = contract.get("mount_token")
         if proprio_time_delta is None:
@@ -131,6 +203,10 @@ class OnlineEventValueSidecar(nn.Module):
             raise ValueError("Observer checkpoint proprio_time_delta differs from online configuration")
         if checkpoint_mount is not None and int(checkpoint_mount) != int(online_mount_token):
             raise ValueError("Observer checkpoint mount token differs from online configuration")
+        if contract.get("control_step_stride") is not None and float(contract["control_step_stride"]) != float(
+            proprio_time_delta
+        ):
+            raise ValueError("Observer control_step_stride differs from online proprio_time_delta")
         return cls(
             observer,
             value,
@@ -169,6 +245,11 @@ class OnlineEventValueSidecar(nn.Module):
                 "with the same chunk-time proprio/mount contract as the Observer."
             )
         student_contract = student_contract or {}
+        if require_input_contract and (
+            student_contract.get("control_step_stride") is None
+            or student_contract.get("proprio_derivative_unit") != "per_control_step"
+        ):
+            raise ValueError("RGB student checkpoint lacks a per-control-step chunk input contract")
         if student_contract.get("proprio_time_delta") is not None and float(
             student_contract["proprio_time_delta"]
         ) != float(sidecar.proprio_time_delta):
@@ -177,6 +258,10 @@ class OnlineEventValueSidecar(nn.Module):
             sidecar.online_mount_token
         ):
             raise ValueError("RGB student mount token differs from Event Observer contract")
+        if student_contract.get("control_step_stride") is not None and int(
+            student_contract["control_step_stride"]
+        ) != int(sidecar.proprio_time_delta):
+            raise ValueError("RGB student control_step_stride differs from Event Observer contract")
         sidecar.rgb_student = student.to(device)
         for parameter in sidecar.rgb_student.parameters():
             parameter.requires_grad_(False)
@@ -262,28 +347,51 @@ class OnlineEventValueSidecar(nn.Module):
         self,
         representation: torch.Tensor,
         rewards: torch.Tensor,
-        dones: torch.Tensor,
+        terminations: torch.Tensor,
+        truncations: torch.Tensor,
         event_ids: torch.Tensor,
         *,
         gamma: float,
-    ) -> torch.Tensor:
-        """TD-style Event-SMDP loss on current-policy rollout data.
+        bootstrap_on_truncation: bool = False,
+        valid_mask: torch.Tensor | None = None,
+        return_stats: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, int]:
+        """Independent remaining-event return loss for online ``V_E``.
 
-        Tensor layout here is time-major ``[T,B]`` for rewards/IDs and
-        ``[T+1,B]`` for dones/values.  Targets are detached, use real event
-        duration discounting, and use a zero influence tensor because this
-        critic update estimates value rather than action credit.
+        For each valid chunk state ``t`` this regresses to the discounted
+        rewards through its next event boundary plus a detached target critic
+        bootstrap.  It intentionally never consumes Event advantage or
+        Influence redistribution targets.
         """
         if representation.ndim != 3:
             raise ValueError("representation must be [batch,time_plus_one,dim]")
         values = self.event_value(representation).transpose(0, 1)
-        if values.shape != dones.shape or rewards.shape != event_ids.shape or values.shape[0] != rewards.shape[0] + 1:
+        if (
+            values.shape != terminations.shape
+            or values.shape != truncations.shape
+            or rewards.shape != event_ids.shape
+            or values.shape[0] != rewards.shape[0] + 1
+        ):
             raise ValueError("Event Value rollout tensors have inconsistent time-major shapes")
         target_values = self.target_event_value(representation).transpose(0, 1)
-        _, targets = event_smdp_credit(
-            rewards, dones, event_ids, target_values, torch.zeros_like(rewards), gamma=gamma
+        targets, valid = event_boundary_value_targets(
+            rewards,
+            terminations,
+            truncations,
+            event_ids,
+            target_values,
+            gamma=gamma,
+            bootstrap_on_truncation=bootstrap_on_truncation,
+            valid_mask=valid_mask,
         )
-        return F.smooth_l1_loss(values[:-1], targets.detach())
+        errors = F.smooth_l1_loss(values[:-1], targets.detach(), reduction="none")
+        loss_sum = errors.masked_select(valid).sum()
+        count = int(valid.sum().item())
+        if return_stats:
+            return loss_sum, count
+        if not count:
+            raise ValueError("Event Value loss has no valid chunk states")
+        return loss_sum / count
 
 
 def _right_wrist_stream(wrist_images: torch.Tensor) -> torch.Tensor:

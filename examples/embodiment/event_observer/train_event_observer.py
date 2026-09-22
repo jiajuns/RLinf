@@ -52,7 +52,12 @@ class CachedEpisodes(Dataset):
     }
 
     def __init__(
-        self, root: Path, holdout_tasks: set[str], validation: bool, episode_validation_fraction: float = 0.0
+        self,
+        root: Path,
+        holdout_tasks: set[str],
+        validation: bool,
+        episode_validation_fraction: float = 0.0,
+        control_step_stride: int = 1,
     ) -> None:
         if not 0.0 <= episode_validation_fraction < 1.0:
             raise ValueError("episode_validation_fraction must be in [0, 1)")
@@ -62,6 +67,11 @@ class CachedEpisodes(Dataset):
                 missing = self.REQUIRED.difference(data.files)
                 if missing:
                     raise ValueError(f"{path} lacks cache fields: {sorted(missing)}")
+                observed_stride = int(data["control_step_stride"]) if "control_step_stride" in data.files else 1
+                if observed_stride != control_step_stride:
+                    raise ValueError(
+                        f"{path} has control_step_stride={observed_stride}, expected {control_step_stride}"
+                    )
                 task = str(data.get("task", ""))
             task_selected = (task in holdout_tasks) == validation
             # A task-held-out split is the only valid generalization metric
@@ -195,19 +205,24 @@ def main() -> None:
         "--proprio-time-delta", type=float, default=1.0,
         help="Physical/control-step interval represented by adjacent cached Observer frames.",
     )
+    parser.add_argument("--control-step-stride", type=int, default=1)
     parser.add_argument(
         "--online-mount-token", type=int, default=2,
         help="Mount token used by the fused online head/right-wrist RGB frontend.",
     )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
-    if args.proprio_time_delta <= 0:
+    if args.proprio_time_delta <= 0 or args.control_step_stride < 1:
         raise ValueError("--proprio-time-delta must be positive")
+    if float(args.proprio_time_delta) != float(args.control_step_stride):
+        raise ValueError("offline control_step_stride must equal online proprio_time_delta in control-step units")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     held_out = {task for task in args.holdout_tasks.split(",") if task}
-    train = CachedEpisodes(args.cache, held_out, validation=False, episode_validation_fraction=args.episode_validation_fraction)
+    train = CachedEpisodes(args.cache, held_out, validation=False, episode_validation_fraction=args.episode_validation_fraction,
+                           control_step_stride=args.control_step_stride)
     validation = (
-        CachedEpisodes(args.cache, held_out, validation=True, episode_validation_fraction=args.episode_validation_fraction)
+        CachedEpisodes(args.cache, held_out, validation=True, episode_validation_fraction=args.episode_validation_fraction,
+                       control_step_stride=args.control_step_stride)
         if held_out or args.episode_validation_fraction else None
     )
     feature_dim = train[0].features.shape[-1]
@@ -253,6 +268,8 @@ def main() -> None:
                             "version": 1,
                             "proprio_time_delta": args.proprio_time_delta,
                             "mount_token": args.online_mount_token,
+                            "control_step_stride": args.control_step_stride,
+                            "proprio_derivative_unit": "per_control_step",
                         }}, args.output / "best.pt")
 
 

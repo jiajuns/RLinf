@@ -64,6 +64,9 @@ if [[ -n "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" ]]; then
     "+algorithm.event_diagnostics.output_dir=${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}"
     "+algorithm.event_diagnostics.record_only=${ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY}"
   )
+  if [[ "${ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY}" == "true" ]]; then
+    diagnostic_args+=("+algorithm.event_diagnostics.freeze_sidecars=true")
+  fi
 fi
 
 # This phase is collection/pretraining, not policy evaluation.  Disable eval
@@ -85,7 +88,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
   "${sidecar_resume_args[@]}" \
   +algorithm.event_sidecar.target_ema_decay=0.995 \
-  +algorithm.event_sidecar.proprio_time_delta=50.0 +algorithm.event_sidecar.online_mount_token=2 +algorithm.event_sidecar.strict_input_contract=true +algorithm.event_sidecar.value_lr="${ROBOTWIN_EVENT_VALUE_LR}" \
+  +algorithm.event_sidecar.proprio_time_delta=50.0 +algorithm.event_sidecar.online_mount_token=2 +algorithm.event_sidecar.strict_input_contract=true +algorithm.event_sidecar.bootstrap_on_truncation=false +algorithm.event_sidecar.value_lr="${ROBOTWIN_EVENT_VALUE_LR}" \
   +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 \
   +algorithm.event_branch.execution_unit=full_action_chunk +algorithm.event_branch.min_supervision=500 \
   +algorithm.event_branch.influence_lr=1.0e-4 \

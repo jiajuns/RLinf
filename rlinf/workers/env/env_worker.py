@@ -579,7 +579,7 @@ class EnvWorker(Worker):
                     (branch_batch_size, branch_candidates), dtype=torch.bool
                 ),
                 "branch_state_ids": torch.full(
-                    (branch_batch_size, 2), -1, dtype=torch.long
+                    (branch_batch_size, 3), -1, dtype=torch.long
                 ),
                 "branch_main_images": torch.zeros(
                     (branch_batch_size, branch_candidates, *extracted_obs["main_images"].shape[1:]),

@@ -79,6 +79,24 @@ def test_event_residual_lambda_zero_is_exactly_gae():
     torch.testing.assert_close(actual_returns, expected_returns)
 
 
+def test_event_residual_keeps_ppo_critic_return_on_gae_when_actor_mix_is_nonzero():
+    rewards = torch.tensor([[1.0], [0.0]])
+    dones = torch.tensor([[False], [False], [True]])
+    values = torch.tensor([[0.0], [0.0], [0.0]])
+    ids = torch.zeros(2, 1, dtype=torch.long)
+    event_values = torch.tensor([[0.0], [0.0], [5.0]])
+    influence = torch.zeros(2, 1)
+    gae_advantage, gae_returns = compute_gae_advantages_and_returns(
+        rewards, dones=dones, values=values, gamma=0.9, gae_lambda=0.95, normalize_advantages=False
+    )
+    mixed_advantage, critic_returns = compute_event_smdp_residual_advantages(
+        rewards, dones, values, ids, event_values, influence,
+        gamma=0.9, gae_lambda=0.95, event_mix_lambda=0.5, normalize_advantages=False,
+    )
+    assert not torch.equal(mixed_advantage, gae_advantage)
+    torch.testing.assert_close(critic_returns, gae_returns)
+
+
 def test_chunk_level_residual_keeps_branch_and_credit_granularity_aligned():
     """A [C,B,K] sidecar is reduced to one counterfactual per policy chunk."""
     chunks, batch, action_chunk = 2, 1, 3

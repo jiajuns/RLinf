@@ -78,7 +78,7 @@ class EnvOutput:
     # Stable lightweight identity of the cloned base state: reset seed and
     # elapsed action steps.  It is for audit split/deduplication only, never
     # an input to the policy or Observer.
-    branch_state_ids: Optional[torch.Tensor] = None  # [B, 2]
+    branch_state_ids: Optional[torch.Tensor] = None  # [B, 3]: reset seed, elapsed steps, snapshot digest
     branch_main_images: Optional[torch.Tensor] = None  # [B, candidates, H, W, 3]
     branch_wrist_images: Optional[torch.Tensor] = None  # [B, candidates, (W), H, W, 3]
     branch_measured_state16: Optional[torch.Tensor] = None  # [B, candidates, 16]

@@ -3,6 +3,7 @@ import pytest
 
 from rlinf.algorithms.event_value import (
     OnlineEventValueSidecar,
+    event_boundary_value_targets,
     infer_branch_future_event_values,
     infer_event_sidecar_rollout,
 )
@@ -20,11 +21,36 @@ def test_frozen_observer_infers_local_event_ids_and_online_value_loss():
     representation = torch.randn(2, 5, 8)
     rewards = torch.zeros(4, 2)
     rewards[-1] = 1
-    dones = torch.zeros(5, 2, dtype=torch.bool)
-    dones[-1] = True
+    terminations = torch.zeros(5, 2, dtype=torch.bool)
+    terminations[-1] = True
+    truncations = torch.zeros_like(terminations)
     event_ids = torch.tensor([[0, 0], [0, 0], [1, 1], [1, 1]])
-    loss = sidecar.smdp_value_loss(representation, rewards, dones, event_ids, gamma=0.99)
+    loss = sidecar.smdp_value_loss(
+        representation, rewards, terminations, truncations, event_ids, gamma=0.99
+    )
     assert torch.isfinite(loss) and loss.item() >= 0
+
+
+def test_event_value_targets_correct_each_internal_chunk_not_event_credit_average():
+    rewards = torch.tensor([[1.0], [2.0]])
+    terminations = torch.zeros(3, 1, dtype=torch.bool)
+    truncations = torch.zeros_like(terminations)
+    ids = torch.zeros(2, 1, dtype=torch.long)
+    target_values = torch.tensor([[0.0], [0.0], [3.0]])
+    targets, valid = event_boundary_value_targets(
+        rewards, terminations, truncations, ids, target_values,
+        gamma=0.5, bootstrap_on_truncation=False,
+    )
+    assert valid.all()
+    # t=0 retains both rewards; t=1 sees only its remaining reward.  These
+    # targets must not be a uniform event advantage copied to every chunk.
+    torch.testing.assert_close(targets[:, 0], torch.tensor([2.75, 3.5]))
+    truncations[-1] = True
+    truncated_targets, _ = event_boundary_value_targets(
+        rewards, terminations, truncations, ids, target_values,
+        gamma=0.5, bootstrap_on_truncation=False,
+    )
+    torch.testing.assert_close(truncated_targets[:, 0], torch.tensor([2.0, 2.0]))
 
 
 def test_event_sidecar_can_use_a_frozen_rgb_student_online():
@@ -43,7 +69,10 @@ def test_deployable_sidecar_requires_matching_chunk_input_contract(tmp_path):
     observer = EventObserver(5, 3, 4, num_geometric_primitives=2, num_state_change_primitives=1)
     value = EventValueCritic(256)
     student = RGBRoleFeatureStudent(5)
-    contract = {"version": 1, "proprio_time_delta": 50.0, "mount_token": 2}
+    contract = {
+        "version": 1, "proprio_time_delta": 50.0, "mount_token": 2,
+        "control_step_stride": 50, "proprio_derivative_unit": "per_control_step",
+    }
     observer_path = tmp_path / "observer.pt"
     student_path = tmp_path / "student.pt"
     torch.save(

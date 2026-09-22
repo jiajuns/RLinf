@@ -22,7 +22,8 @@ ROOT=/data/user/leviccdong/EKSF
 REPO=$ROOT/code/RLinf-piRL
 EPISODE_LIST=${SAM_EPISODE_LIST:?set a successful adjust_bottle manifest}
 TRACK_ROOT=${SAM_TRACK_ROOT:-$ROOT/data/robotwin_adjust_bottle_event_tracks_v1}
-CACHE_ROOT=${EVENT_CACHE_ROOT:-$ROOT/data/robotwin_adjust_bottle_event_cache_v1}
+CACHE_ROOT=${EVENT_CACHE_ROOT:-$ROOT/data/robotwin_adjust_bottle_event_cache_chunk50_v2}
+CONTROL_STEP_STRIDE=${CONTROL_STEP_STRIDE:-50}
 EPISODES_PER_TASK=${EPISODES_PER_TASK:-1}
 REBUILD_EVENT_CACHE=${REBUILD_EVENT_CACHE:-0}
 TASK_ID=${SLURM_ARRAY_TASK_ID:?submit this as a Slurm array}
@@ -50,7 +51,7 @@ for INDEX in $(seq "$START" "$((END - 1))"); do
 import sys
 import numpy as np
 with np.load(sys.argv[1], allow_pickle=False) as data:
-    raise SystemExit(0 if "source_episode" in data else 1)
+    raise SystemExit(0 if "source_episode" in data and int(data.get("control_step_stride", -1)) == 50 else 1)
 PY
     then
       echo "existing compatible $OUTPUT"
@@ -58,7 +59,7 @@ PY
     fi
   fi
   python -u "$REPO/examples/embodiment/event_observer/build_adjust_bottle_event_cache.py" \
-    --episode "$EPISODE" --tracks "$TRACK" --output "$OUTPUT"
+    --episode "$EPISODE" --tracks "$TRACK" --output "$OUTPUT" --control-step-stride "$CONTROL_STEP_STRIDE"
 done
 
 python - "$CACHE_ROOT" <<'PY'
@@ -69,7 +70,7 @@ import numpy as np
 root = Path(sys.argv[1])
 for path in root.glob("*.npz"):
     with np.load(path, allow_pickle=False) as data:
-        if not np.isfinite(data["features"]).all() or data["features"].shape[-1] != 30:
+        if not np.isfinite(data["features"]).all() or data["features"].shape[-1] != 30 or int(data.get("control_step_stride", -1)) != 50:
             raise SystemExit(f"invalid observer cache {path}")
 print({"cache_files": len(list(root.glob("*.npz")))})
 PY

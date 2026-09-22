@@ -195,8 +195,8 @@ def compute_event_smdp_residual_advantages(
     increasing the lambda after Influence Model calibration.  Returns target
     the original π0.5 critic, while ``V_E`` remains a separate sidecar.
     """
-    if values is None or event_ids is None or event_values is None or intervention_influence is None:
-        raise ValueError("event_smdp_residual requires values, event IDs/values and intervention influence")
+    if values is None:
+        raise ValueError("event_smdp_residual requires the original PPO critic values")
     if not 0.0 <= event_mix_lambda <= 1.0:
         raise ValueError("event_mix_lambda must be in [0, 1]")
     # Local import avoids a module-level registry import cycle.
@@ -210,6 +210,17 @@ def compute_event_smdp_residual_advantages(
         dones=dones,
         normalize_advantages=False,
     )
+    # Hard safety identity: during calibration lambda=0 must not even evaluate
+    # the auxiliary Event tensors.  Besides saving compute, this prevents an
+    # invalid sidecar value from leaking through IEEE ``0 * NaN`` into the
+    # official GAE control.
+    if event_mix_lambda == 0.0:
+        returns = values[:-1] + gae_advantages
+        if normalize_advantages:
+            gae_advantages = safe_normalize(gae_advantages, loss_mask=loss_mask)
+        return gae_advantages, returns
+    if event_ids is None or event_values is None or intervention_influence is None:
+        raise ValueError("nonzero event_smdp_residual requires event IDs/values and intervention influence")
     event_advantages, _ = event_smdp_credit(
         rewards,
         dones,
@@ -222,7 +233,11 @@ def compute_event_smdp_residual_advantages(
         influence_clip=influence_clip,
     )
     advantages = (1.0 - event_mix_lambda) * gae_advantages + event_mix_lambda * event_advantages
-    returns = values[:-1] + advantages
+    # Do not let auxiliary Event redistribution retarget π0.5's original
+    # critic.  The actor consumes the mixed advantage, while the PPO value
+    # head continues to regress the independent GAE return; V_E has its own
+    # remaining-event target in ``event_value.py``.
+    returns = values[:-1] + gae_advantages
     if normalize_advantages:
         advantages = safe_normalize(advantages, loss_mask=loss_mask)
     return advantages, returns

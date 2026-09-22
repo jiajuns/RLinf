@@ -115,6 +115,19 @@ def _metrics(true_scores: np.ndarray, predicted_scores: np.ndarray, tie_eps: flo
     return result
 
 
+def _same_action_repeatability(returns: np.ndarray, actions: np.ndarray | None) -> dict[str, Any]:
+    """Measure branch-return variation for exact duplicate action chunks."""
+    if actions is None:
+        return {"pairs": 0, "absolute_return_difference": {"count": 0}}
+    differences = []
+    for state_returns, state_actions in zip(returns, actions, strict=True):
+        for left in range(len(state_returns)):
+            for right in range(left + 1, len(state_returns)):
+                if np.array_equal(state_actions[left], state_actions[right]):
+                    differences.append(abs(float(state_returns[left] - state_returns[right])))
+    return {"pairs": len(differences), "absolute_return_difference": _summary(np.asarray(differences))}
+
+
 def _markdown(report: dict[str, Any]) -> str:
     global_metrics = report["global"]
     lines = [
@@ -138,6 +151,7 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- actual branch duration mean: {report['branch_duration_steps'].get('mean')}",
         f"- bootstrap discount units mean: {report['bootstrap_discount_units'].get('mean')}",
         f"- terminal / truncated candidate fraction: {report['terminal_candidate_fraction']} / {report['truncated_candidate_fraction']}",
+        f"- same-action repeat pairs / |return difference| mean: {report['same_action_repeatability']['pairs']} / {report['same_action_repeatability']['absolute_return_difference'].get('mean')}",
         "",
         "## Per-event return spread",
         "",
@@ -177,7 +191,7 @@ def main() -> None:
         raise FileNotFoundError(f"no diagnostic artifacts under {args.diagnostic_dir}")
     returns, predictions, event_ids, success = [], [], [], []
     success_available = []
-    durations, discount_units, terminals, truncations = [], [], [], []
+    durations, discount_units, terminals, truncations, action_rows = [], [], [], [], []
     invalid_candidate_states = 0
     for path in files:
         with np.load(path, allow_pickle=False) as payload:
@@ -205,6 +219,11 @@ def main() -> None:
                 terminals.append(np.asarray(payload["branch_terminations"], dtype=bool)[complete])
             if "branch_truncations" in payload.files:
                 truncations.append(np.asarray(payload["branch_truncations"], dtype=bool)[complete])
+            if "candidate_actions" in payload.files:
+                candidate_actions = np.asarray(payload["candidate_actions"])
+                if candidate_actions.shape[:2] != true_values.shape:
+                    raise ValueError(f"candidate_actions is misaligned in {path}")
+                action_rows.append(candidate_actions[complete])
             success_available.append(
                 bool(np.asarray(payload["success_available"]).item())
                 if "success_available" in payload.files
@@ -216,6 +235,7 @@ def main() -> None:
     predicted_values = np.concatenate(predictions, axis=0)
     ids = np.concatenate(event_ids, axis=0)
     branch_success = np.concatenate(success, axis=0)
+    candidate_actions = np.concatenate(action_rows, axis=0) if action_rows else None
 
     per_event: dict[str, Any] = {}
     for event_id in np.unique(ids):
@@ -236,6 +256,7 @@ def main() -> None:
         "invalid_candidate_states": invalid_candidate_states,
         "branch_duration_steps": _summary(np.concatenate(durations) if durations else np.asarray([])),
         "bootstrap_discount_units": _summary(np.concatenate(discount_units) if discount_units else np.asarray([])),
+        "same_action_repeatability": _same_action_repeatability(true_values, candidate_actions),
         "terminal_candidate_fraction": float(np.concatenate(terminals).mean()) if terminals else None,
         "truncated_candidate_fraction": float(np.concatenate(truncations).mean()) if truncations else None,
         "global": _metrics(true_values, predicted_values, args.tie_eps),

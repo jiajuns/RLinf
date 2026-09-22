@@ -79,6 +79,7 @@ exec python "${REPO_PATH}/examples/embodiment/train_embodied_agent.py" \
   +algorithm.event_sidecar.proprio_time_delta=50.0 \
   +algorithm.event_sidecar.online_mount_token=2 \
   +algorithm.event_sidecar.strict_input_contract=true \
+  +algorithm.event_sidecar.bootstrap_on_truncation=false \
   +algorithm.event_branch.num_candidates=4 \
   +algorithm.event_branch.chunk_interval=10 \
   +algorithm.event_branch.execution_unit=full_action_chunk \

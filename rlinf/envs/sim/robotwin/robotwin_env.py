@@ -14,6 +14,7 @@
 
 import json
 import os
+import hashlib
 from typing import Optional, Union
 
 import gymnasium as gym
@@ -132,10 +133,20 @@ class RoboTwinEnv(gym.Env):
         # Executing a configurable prefix here made gamma exponents and credit
         # granularity disagree with PPO's chunk-level objective.
         requested_steps = int(branch_actions.shape[2])
-        state_ids = torch.stack(
-            (self.reset_state_ids.to(device=self.device, dtype=torch.long), self._elapsed_steps.to(torch.long)), dim=-1
-        ).detach().cpu()
         snapshot = self.get_state()
+        # The seed/elapsed pair is only a grouping key.  Retain a compact
+        # digest of the serialized clone as an auditable identity check; it
+        # never becomes an Observer or policy feature.
+        snapshot_digest = int.from_bytes(hashlib.sha256(snapshot).digest()[:8], "big") & ((1 << 63) - 1)
+        state_ids = torch.cat(
+            (
+                torch.stack(
+                    (self.reset_state_ids.to(device=self.device, dtype=torch.long), self._elapsed_steps.to(torch.long)), dim=-1
+                ).detach().cpu(),
+                torch.full((self.num_envs, 1), snapshot_digest, dtype=torch.long),
+            ),
+            dim=-1,
+        )
         rewards, durations, successes, terminations, truncations = [], [], [], [], []
         valid, main_images, wrist_images, measured_states = [], [], [], []
         try:

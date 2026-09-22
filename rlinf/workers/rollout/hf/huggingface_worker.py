@@ -80,10 +80,13 @@ class MultiStepRolloutWorker(Worker):
         event_branch_cfg = self.algorithm_cfg.get("event_branch", {})
         self.event_branch_candidates = int(event_branch_cfg.get("num_candidates", 0))
         self.event_branch_interval = int(event_branch_cfg.get("chunk_interval", 0))
+        self.event_branch_repeat_primary = int(event_branch_cfg.get("repeat_primary_candidates", 0))
         if self.event_branch_candidates not in (0,) and self.event_branch_candidates < 2:
             raise ValueError("event_branch.num_candidates must be zero or at least two")
         if self.event_branch_candidates and self.event_branch_interval < 1:
             raise ValueError("event_branch.chunk_interval must be positive when branches are enabled")
+        if not 0 <= self.event_branch_repeat_primary < max(self.event_branch_candidates, 1):
+            raise ValueError("event_branch.repeat_primary_candidates must be in [0, num_candidates)")
         self._event_branch_chunk_index = 0
         self.expert_model = None
         self.rlt_feature_model = None
@@ -640,8 +643,11 @@ class MultiStepRolloutWorker(Worker):
         self._event_branch_chunk_index += 1
         if not selected:
             return None
-        candidates = [primary_actions]
-        for _ in range(self.event_branch_candidates - 1):
+        # Exact duplicate candidates are an opt-in diagnostic: their return
+        # spread estimates simulator/render/bootstrap repeatability before we
+        # interpret different-action spread as causal signal.
+        candidates = [primary_actions] * (1 + self.event_branch_repeat_primary)
+        for _ in range(self.event_branch_candidates - len(candidates)):
             sampled, _ = self._predict_rollout_actions(env_obs)
             if isinstance(sampled, np.ndarray):
                 sampled = torch.from_numpy(sampled)

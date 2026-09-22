@@ -17,12 +17,17 @@ from rlinf.models.embodiment.event_observer import RGBRoleFeatureStudent
 
 
 class CachedRGBEpisodes(Dataset):
-    def __init__(self, root: Path, *, validation: bool, fraction: float) -> None:
+    def __init__(self, root: Path, *, validation: bool, fraction: float, control_step_stride: int) -> None:
         self.paths: list[Path] = []
         for path in sorted(root.glob("*.npz")):
             with np.load(path, allow_pickle=False) as data:
                 if "source_episode" not in data or "features" not in data:
                     continue
+                observed_stride = int(data["control_step_stride"]) if "control_step_stride" in data.files else 1
+                if observed_stride != control_step_stride:
+                    raise ValueError(
+                        f"{path} has control_step_stride={observed_stride}, expected {control_step_stride}"
+                    )
                 bucket = int(hashlib.sha256(path.name.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
             if (bucket < fraction) == validation:
                 self.paths.append(path)
@@ -36,10 +41,13 @@ class CachedRGBEpisodes(Dataset):
         with np.load(self.paths[index], allow_pickle=False) as data:
             source = Path(str(data["source_episode"]))
             target = torch.from_numpy(np.asarray(data["features"], np.float32))
+            frame_indices = np.asarray(
+                data["frame_indices"] if "frame_indices" in data.files else np.arange(len(target)), np.int64
+            )
         with h5py.File(source, "r") as handle:
-            head = torch.from_numpy(np.asarray(handle["rgb"]["head_camera"], np.uint8))
-            wrist = torch.from_numpy(np.asarray(handle["rgb"]["right_camera"], np.uint8))
-            measured_state16 = torch.from_numpy(np.asarray(handle["ee_state16"], np.float32))
+            head = torch.from_numpy(np.asarray(handle["rgb"]["head_camera"][frame_indices], np.uint8))
+            wrist = torch.from_numpy(np.asarray(handle["rgb"]["right_camera"][frame_indices], np.uint8))
+            measured_state16 = torch.from_numpy(np.asarray(handle["ee_state16"][frame_indices], np.float32))
         if len(head) != len(wrist) or len(head) != len(target) or len(measured_state16) != len(target):
             raise ValueError(f"unaligned RGB/teacher cache: {self.paths[index]}")
         return head, wrist, measured_state16, target
@@ -81,14 +89,19 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--proprio-time-delta", type=float, default=1.0)
     parser.add_argument("--online-mount-token", type=int, default=2)
+    parser.add_argument("--control-step-stride", type=int, default=1)
     args = parser.parse_args()
     if not 0 < args.validation_fraction < 1:
         raise ValueError("validation fraction must be in (0,1)")
-    if args.proprio_time_delta <= 0:
+    if args.proprio_time_delta <= 0 or args.control_step_stride < 1:
         raise ValueError("--proprio-time-delta must be positive")
+    if float(args.proprio_time_delta) != float(args.control_step_stride):
+        raise ValueError("offline control_step_stride must equal online proprio_time_delta in control-step units")
     torch.manual_seed(args.seed); np.random.seed(args.seed)
-    train = CachedRGBEpisodes(args.cache, validation=False, fraction=args.validation_fraction)
-    validation = CachedRGBEpisodes(args.cache, validation=True, fraction=args.validation_fraction)
+    train = CachedRGBEpisodes(args.cache, validation=False, fraction=args.validation_fraction,
+                              control_step_stride=args.control_step_stride)
+    validation = CachedRGBEpisodes(args.cache, validation=True, fraction=args.validation_fraction,
+                                   control_step_stride=args.control_step_stride)
     feature_dim = train[0][3].shape[-1]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = RGBRoleFeatureStudent(feature_dim).to(device)
@@ -111,7 +124,9 @@ def main() -> None:
             best = validation_mae
             torch.save({"rgb_student": model.state_dict(), "feature_dim": feature_dim, "metrics": metrics,
                         "online_input_contract": {"version": 1, "proprio_time_delta": args.proprio_time_delta,
-                                                  "mount_token": args.online_mount_token}}, args.output / "best.pt")
+                                                  "mount_token": args.online_mount_token,
+                                                  "control_step_stride": args.control_step_stride,
+                                                  "proprio_derivative_unit": "per_control_step"}}, args.output / "best.pt")
 
 
 if __name__ == "__main__":

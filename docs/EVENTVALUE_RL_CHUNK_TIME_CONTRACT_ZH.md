@@ -45,7 +45,7 @@ branch 输入固定为：
 | `branch_terminations` / `branch_truncations` | 终止/截断标志 |
 | `branch_valid` | 数值、图像和 measured proprio 均可用的候选掩码；terminal 本身仍是有效样本 |
 | `branch_mask` | 此 rollout chunk 是否真的执行了 branch（跳过的 chunk 为 false） |
-| `branch_state_ids` | `[reset_seed, elapsed_action_steps]`，只用于身份审计、去重和 split，不进网络 |
+| `branch_state_ids` | `[reset_seed, elapsed_action_steps, snapshot_digest]`；digest 是序列化 SAPIEN clone 的 SHA-256 截断，只用于身份审计、去重和 split，不进网络 |
 | `branch_actions` | Flow-SDE 产生的完整候选 action chunks |
 | `branch_main_images`、`branch_wrist_images`、`branch_measured_state16` | endpoint 处的在线可得观测，用于 target \(V_E\) |
 
@@ -70,7 +70,19 @@ chunk_event_id = event_ids[..., 0]       # [C, B]
 V_E(z_0 ... z_C)                         # z 每个 chunk boundary 一个
 ```
 
-`event_smdp_credit` 因此沿 `C` 个完整 chunk 计算真实 event duration \(D_j\)（单位为 chunk），而不是沿 `C × K` 个重复 token 计算。PPO 保持既有接口：为兼容通用 batch 结构，sidecar 输出仍可填充为 `[C+1,B,K]`，但在 `chunk_level` 预处理时只取 token 0；其余重复项不会参与 SMDP target。
+`event_smdp_credit` 只用于 **actor Event credit**，沿 `C` 个完整 chunk 计算真实 event duration \(D_j\)（单位为 chunk），而不是沿 `C × K` 个重复 token 计算。PPO 保持既有接口：为兼容通用 batch 结构，sidecar 输出仍可填充为 `[C+1,B,K]`，但在 `chunk_level` 预处理时只取 token 0；其余重复项不会参与 SMDP target。
+
+`V_E` 的训练目标现改为独立的 `event_boundary_value_targets`，**绝不复用** Event credit/均分 advantage target。对于每个有效 chunk state \(t\)，令 \(b\) 为当前事件的下一个 learned boundary、终止点或有效 rollout 末端：
+
+\[
+y_t=\sum_{k=t}^{b-1}\gamma^{k-t}r_k+\gamma^{b-t}m_b\bar V_E(z_b).
+\]
+
+因此同一事件内部不同 chunk 会有不同的 remaining-return target；事件起点正确不再掩盖内部状态估值错误。`valid_mask` 仅选择真实有效 rollout state；padding 不参与 loss。
+
+### 2.1 终止、截断与 bootstrap
+
+`termination` 与 `truncation` 不再先合并为一个模糊的 done。`termination` 永远禁止 bootstrap；`truncation` 是否允许 bootstrap 由 `algorithm.event_sidecar.bootstrap_on_truncation` 显式控制，默认 `false`，即对齐当前 PPO 使用合并 `dones` 的 baseline 语义。若未来 baseline 改为对“仅采样窗口截断”进行 value bootstrap，必须同步把该开关设为 `true`，并在 PPO/`V_E`/branch 三处一起修改、重新跑 baseline；不能只改 Event sidecar。
 
 ### 3. `proprio_time_delta` 与 mount token 合同
 
@@ -103,7 +115,7 @@ V_E(z_0 ... z_C)                         # z 每个 chunk boundary 一个
 新增机制：
 
 1. rank 0 在 init/resume 后广播 `V_E`、EMA target critic 和 Influence Model 参数/缓冲区；这样 Influence MLP 不会在不同 rank 各自随机初始化。
-2. 每次 `V_E` 与 Influence 反向传播后，对 auxiliary gradient 做 all-reduce 平均，随后每个 rank 使用同一梯度执行 AdamW step。
+2. 每次 `V_E` 与 Influence 更新时，每个 rank 反传其**局部 loss sum**；无有效样本的 rank 反传与模型相连的零，再让所有 rank 进入同一 all-reduce。梯度总和按全局有效样本数归一化，避免“局部 mean 再按 rank 平均”的偏差，也避免一个 rank 跳过 collective 导致死锁。
 3. sidecar checkpoint 升级为 `eventvalue_rl_sidecars_v2`，保存/恢复 `event_value_optimizer`、`influence_optimizer`、EMA target、累计 branch 计数、时间单位、delta 和 mount token；加载 optimizer state 后迁移 moment 到 sidecar GPU。
 4. 恢复时拒绝非 `full_action_chunk` 的 sidecar，或 delta/mount 不匹配的 sidecar。
 
@@ -117,9 +129,11 @@ V_E(z_0 ... z_C)                         # z 每个 chunk boundary 一个
 I_0(s)=Y_0(s)-\frac{1}{|\mathcal M_s|}\sum_{m\in\mathcal M_s}Y_m(s).
 \]
 
-只有 `branch_mask=true`、candidate 0 有效且至少有两个有效 candidate 的 state 才参与 `I_\xi` loss。无有效 supervision 的 rollout 不调用空掩码 loss，也不会计入 calibration 数量。分支端点 value 使用 EMA target \(\bar V_E\)，而非正在被快速更新的 online \(V_E\)。
+只有 `branch_mask=true`、candidate 0 有效且至少有两个有效 candidate 的 state 才参与 `I_\xi` loss。无有效 supervision 的 rank 贡献零梯度，不会计入 calibration 数量；全局完全无样本时所有 rank 一起跳过 optimizer step。分支端点 value 使用 EMA target \(\bar V_E\)，而非正在被快速更新的 online \(V_E\)。
 
-诊断 sidecar (`branch_diag_rank*_opt*_seen*.npz`) 现保存：完整候选动作、`state_ids`、event id、候选有效掩码、request/actual duration、terminal/truncated、reward、bootstrap、discounted bootstrap、最终 return、预测 score、success 标签和 gamma。`analyze_branch_diagnostics.py` 会剔除候选不完整的 state，并额外报告实际时长、终止/截断比例；它继续报告 return spread、zero baseline MSE、tie-aware pairwise accuracy、Kendall-\(\tau_b\)、top-1 regret、prediction collapse 和 success strata。
+诊断 sidecar (`branch_diag_rank*_opt*_seen*.npz`) 现保存：完整候选动作、`state_ids=[seed,elapsed,snapshot_digest]`、policy version、run id、event id、候选有效掩码、request/actual duration、terminal/truncated、bootstrap-allowed mask、reward、bootstrap、discounted bootstrap、最终 return、预测 score、success 标签和 gamma。`analyze_branch_diagnostics.py` 会剔除候选不完整的 state，并额外报告实际时长、终止/截断比例；它继续报告 return spread、zero baseline MSE、tie-aware pairwise accuracy、Kendall-\(\tau_b\)、top-1 regret、prediction collapse 和 success strata。
+
+设置 `event_branch.repeat_primary_candidates=1` 时，前两个候选是**完全相同的完整 action chunk**。分析器会单列 same-action repeat return difference；只有不同动作间的 spread 显著超过该重复性噪声，才可将其解释为 action-sensitive signal。
 
 ## Event advantage 的安全开关
 
@@ -129,7 +143,7 @@ I_0(s)=Y_0(s)-\frac{1}{|\mathcal M_s|}\sum_{m\in\mathcal M_s}Y_m(s).
 A=(1-\lambda)A^{\mathrm{GAE}}+\lambda A^{\mathrm{Event}}.
 \]
 
-`_event_credit_mix_lambda()` 增加硬门：默认 `require_ranking_validation=true` 时，除非配置明确给出 `ranking_validation_passed=true`，否则永远返回 \(\lambda=0\)。即使已经有足够 branch labels、足够 optimizer step，actor 仍是原始 GAE。正式脚本现在显式设置：
+`_event_credit_mix_lambda()` 增加硬门：默认 `require_ranking_validation=true` 时，除非配置明确给出 `ranking_validation_passed=true`，否则永远返回 \(\lambda=0\)。即使已经有足够 branch labels、足够 optimizer step，actor 仍是原始 GAE。`event_smdp_residual` 在 \(\lambda=0\) 时直接从 GAE 分支返回，完全不读取 Event tensors，避免 `0×NaN` 污染。正式脚本现在显式设置：
 
 ```text
 event_credit.max_lambda=0.0
@@ -137,7 +151,7 @@ event_credit.require_ranking_validation=true
 event_credit.ranking_validation_passed=false
 ```
 
-只有在冻结/held-out sidecar 验证集通过预注册门槛后，才创建新的可复现实验配置并改为：
+即使 \(\lambda>0\)，原 π0.5 PPO critic 的 regression return 仍固定为独立 GAE return；只有 actor advantage 混合 Event residual。\(V_E\) 始终使用上节自己的 remaining-event target。只有在冻结/held-out sidecar 验证集通过预注册门槛后，才创建新的可复现实验配置并改为：
 
 ```text
 ranking_validation_passed=true
@@ -177,10 +191,10 @@ ramp_optimizer_steps=...
 
 ## 运行顺序
 
-1. 以 50-step chunk boundary 重建/采样 benchmark 内的 offline cache；重训 RGB student 与 Observer，导出含 input contract 的 checkpoint。
-2. 运行 `event_smdp_residual` 且 \(\lambda=0\)：检查 sidecar 能加载、各 rank 的参数/计数一致，正式 PPO 行为仍等价 GAE。
-3. 冻结 actor 或保持 actor lr 为 0，使用 `record_only=true` 收集 full-chunk held-out branch audit；运行 `analyze_branch_diagnostics.py`。
-4. 先做 oracle diagnostic ladder 与 shuffle/reverse controls；满足预注册 ranking 门槛才写入 `ranking_validation_passed=true`，从 \(\lambda=0.1\) 开始 paired seed 训练。
+1. 以 50-step chunk boundary 重建/采样 benchmark 内的 offline cache。缓存 converter 会重新按每 50 控制步计算视觉速度、aperture/EE 差分，并写 `control_step_stride=50` 与 `per_control_step`；不是只改 metadata。RGB trainer 也按同一 `frame_indices` 读取 RGB/proprio。该离散化会使 200-step episode 只有约 4 个 Observer state，必须以 coarse boundary label 重算 boundary F1，不能沿用高频 F1。
+2. 重训 RGB student 与 Observer，导出带 input contract 的 checkpoint；再以该 Observer 表征在**训练 split**校准 online \(V_E\)，收集 branch 并训练 Influence。
+3. 固定 Observer、RGB student、EMA target \(V_E\) 与 Influence，设置 `record_only=true, freeze_sidecars=true`，在按 run/episode/snapshot fingerprint 隔离的 held-out state 上收集 full-chunk audit；对其中一部分使用 `repeat_primary_candidates=1` 测同动作噪声。
+4. 运行 `analyze_branch_diagnostics.py`，随后才做 oracle diagnostic ladder、shuffle/reverse controls。满足预注册 ranking 门槛才写入 `ranking_validation_passed=true`，从 \(\lambda=0.1\) 开始 paired seed 训练。
 
 ## 本地验证
 

@@ -58,13 +58,14 @@ mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}" "${RLINF_RAY_
   +algorithm.event_sidecar.observer_checkpoint="${ROBOTWIN_EVENT_OBSERVER_CKPT}" \
   +algorithm.event_sidecar.rgb_student_checkpoint="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT}" \
   +algorithm.event_sidecar.resume_sidecar_path="${ROBOTWIN_EVENT_SIDECAR_RESUME}" \
-  +algorithm.event_sidecar.target_ema_decay=0.995 +algorithm.event_sidecar.proprio_time_delta=50.0 +algorithm.event_sidecar.online_mount_token=2 \
+  +algorithm.event_sidecar.target_ema_decay=0.995 +algorithm.event_sidecar.proprio_time_delta=50.0 +algorithm.event_sidecar.online_mount_token=2 +algorithm.event_sidecar.bootstrap_on_truncation=false \
   +algorithm.event_sidecar.strict_input_contract=false \
   +algorithm.event_sidecar.value_lr=0.0 \
   +algorithm.event_diagnostics.output_dir="${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" \
   +algorithm.event_diagnostics.record_only=true \
+  +algorithm.event_diagnostics.freeze_sidecars=true \
   +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval=10 \
-  +algorithm.event_branch.execution_unit=full_action_chunk +algorithm.event_branch.min_supervision=999999 \
+  +algorithm.event_branch.execution_unit=full_action_chunk +algorithm.event_branch.repeat_primary_candidates=1 +algorithm.event_branch.min_supervision=999999 \
   +algorithm.event_branch.influence_lr=1.0e-4 \
   +algorithm.event_credit.granularity=chunk +algorithm.event_credit.max_lambda=0.0 +algorithm.event_credit.require_ranking_validation=true +algorithm.event_credit.ranking_validation_passed=false \
   +algorithm.event_credit.min_supervision_for_actor=999999 \
