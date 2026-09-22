@@ -388,7 +388,7 @@ policy_relative_transport_v3/
 
 续跑验证器新增 `--candidate-execution-order`。它允许以 `0,1,2` 和 `2,1,0` 等排列从同一 root snapshot 执行候选，但总是按 candidate identity 写出结果与 `execution_position`。下一次小规模 A6000 采集应比较同一 action 在不同执行位置的 endpoint 输入、bootstrap 与 continuation return：若差异系统性随 position 改变，则重复均值不能消除偏差，必须继续修复 snapshot/控制器状态；若主要是无方向随机波动，才能使用重复均值和方差构造可靠候选对。
 
-第一次跨进程的正序/反序比较出现约 `6e-4` bootstrap 差异，但其 root serialized snapshot 指纹不同，不能把它归因于 position。验证器随后升级为 `--candidate-execution-orders '0,1,2;2,1,0'`：在**同一进程、同一 root snapshot 对象**上依次执行两种排列，并增加 `--skip-continuation`，防止前一个候选的长续跑污染下一个候选的随机/控制器状态。该 branch-only 对照在一个 25-control-step state 得到相同 root RGB/proprio 与相同 snapshot 指纹；同一 candidate 在两种 position 的 bootstrap absolute 差为：candidate 0 `2.81e-5`、candidate 1 `9.80e-6`、candidate 2 `4.84e-5`。这**没有证明存在大的系统性位置偏差**，但该 state 自身的 candidate range 仅约 `0.94e-4–1.35e-4`，因此位置/恢复噪声仍是信号的不可忽略部分。此前将 continuation 混在每个候选执行后的顺序结果不能作为 branch-order 证据；后续应以 branch-only 多 state、多排列审计为准，并把每个 pair 的 order/repeat variance 写入可靠性权重。
+第一次跨进程的正序/反序比较出现约 `6e-4` bootstrap 差异，但其 root serialized snapshot 指纹不同，不能把它归因于 position。验证器随后升级为 `--candidate-execution-orders '0,1,2;2,1,0'`：在**同一进程、同一 root snapshot 对象**上依次执行两种排列，并增加 `--skip-continuation`，防止前一个候选的长续跑污染下一个候选的随机/控制器状态。三状态（25/75/125 control steps）的 branch-only 结果中，同一 candidate 的两种排列 bootstrap 最大差分别为 `4.84e-5`、`2.05e-4`、`2.54e-5`；对应候选 range 为 `0.94e-4/1.35e-4`、`1.20e-3/1.40e-3`、`0.90e-4/0.71e-4`。这**没有证明所有状态存在大的系统性位置偏差**，但低信号 state 的位置/恢复噪声仍是候选信号的不可忽略部分。此前将 continuation 混在每个候选执行后的顺序结果不能作为 branch-order 证据；后续应以 branch-only 多 state、多排列审计为准，并把每个 pair 的 order/repeat variance 写入可靠性权重。
 
 ## 9. 对当前方法效果的严格结论
 
