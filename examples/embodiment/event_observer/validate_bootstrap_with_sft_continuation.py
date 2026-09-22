@@ -129,15 +129,34 @@ def main() -> None:
               "Rows are always written in candidate-index order, so two runs with "
               "different permutations can test execution-position bias."),
     )
+    parser.add_argument(
+        "--candidate-execution-orders",
+        default=None,
+        help=("Semicolon-separated execution-order permutations evaluated from the "
+              "same in-process root snapshot, e.g. '0,1,2;2,1,0'. This is "
+              "stronger than comparing separate process invocations."),
+    )
     args = parser.parse_args()
     if args.candidates < 2 or args.continuation_repeats < 1 or not 0 < args.gamma <= 1:
         raise ValueError("need >=2 candidates, >=1 repeat and gamma in (0,1]")
-    if args.candidate_execution_order is None:
-        execution_order = list(range(args.candidates))
+    def parse_execution_order(text: str) -> list[int]:
+        order = [int(value) for value in text.split(",") if value]
+        if sorted(order) != list(range(args.candidates)):
+            raise ValueError("each candidate execution order must be a permutation of all candidate indices")
+        return order
+
+    if args.candidate_execution_orders is not None:
+        if args.candidate_execution_order is not None:
+            raise ValueError("specify either candidate-execution-order or candidate-execution-orders")
+        execution_orders = [
+            parse_execution_order(text) for text in args.candidate_execution_orders.split(";") if text
+        ]
+        if not execution_orders:
+            raise ValueError("candidate-execution-orders must contain at least one permutation")
+    elif args.candidate_execution_order is None:
+        execution_orders = [list(range(args.candidates))]
     else:
-        execution_order = [int(value) for value in args.candidate_execution_order.split(",") if value]
-        if sorted(execution_order) != list(range(args.candidates)):
-            raise ValueError("candidate-execution-order must be a permutation of all candidate indices")
+        execution_orders = [parse_execution_order(args.candidate_execution_order)]
     if not torch.cuda.is_available():
         raise RuntimeError("this diagnostic intentionally requires CUDA for frozen pi0.5 inference")
     cfg = OmegaConf.load(args.resolved_config)
@@ -164,67 +183,72 @@ def main() -> None:
                 candidate_actions = [_sample_action(model, observation, args.seed + 1009 * current_chunk + candidate) for candidate in range(args.candidates)]
                 if args.duplicate_first_candidate:
                     candidate_actions[-1] = candidate_actions[0].clone()
-                branch_rows_by_candidate: list[dict | None] = [None] * args.candidates
-                try:
-                    for execution_position, candidate in enumerate(execution_order):
-                        action = candidate_actions[candidate]
+                # All listed permutations run from the exact same root object
+                # in one process.  This separates true execution-position
+                # effects from cross-process random-state drift.
+                for order_index, execution_order in enumerate(execution_orders):
+                    branch_rows_by_candidate: list[dict | None] = [None] * args.candidates
+                    try:
+                        for execution_position, candidate in enumerate(execution_order):
+                            action = candidate_actions[candidate]
+                            env.load_state(root)
+                            endpoint, branch_reward, terminal = _chunk(env, action)
+                            endpoint_history = root_history + [endpoint]
+                            first_value = _sidecar_value(sidecar, endpoint_history)
+                            second_value = _sidecar_value(sidecar, endpoint_history)
+                            bootstrap = branch_reward if terminal else branch_reward + args.gamma * first_value
+                            endpoint_state = env.get_state()
+                            continuation_returns = []
+                            for repeat in range(args.continuation_repeats):
+                                env.load_state(endpoint_state)
+                                continuation_obs = endpoint; continuation_reward = 0.0; discount = 1.0; done = terminal
+                                # Same frozen SFT weights.  The repeat seed changes
+                                # only policy sampling, quantifying continuation
+                                # stochasticity instead of hiding it in one roll.
+                                continuation_seed = args.seed + 100000 * current_chunk + 1000 * candidate + repeat
+                                while not done and int(env.elapsed_steps[0]) < int(cfg.env.train.max_episode_steps):
+                                    follow = _sample_action(model, continuation_obs, continuation_seed + int(env.elapsed_steps[0]))
+                                    continuation_obs, reward, done = _chunk(env, follow)
+                                    continuation_reward += discount * reward; discount *= args.gamma
+                                continuation_returns.append(continuation_reward)
+                            branch_rows_by_candidate[candidate] = {
+                                "candidate": candidate, "branch_reward": branch_reward, "terminal": terminal,
+                                "execution_position": execution_position,
+                                "bootstrap_target": bootstrap, "endpoint_value_first": first_value,
+                                "endpoint_value_repeat_absdiff": abs(first_value - second_value),
+                                "endpoint_input_fingerprint": _endpoint_fingerprint(endpoint),
+                                "action_fingerprint": _action_fingerprint(action), "continuation_returns": continuation_returns,
+                                "continuation_mean": float(np.mean(continuation_returns)), "continuation_std": float(np.std(continuation_returns)),
+                            }
+                    finally:
                         env.load_state(root)
-                        endpoint, branch_reward, terminal = _chunk(env, action)
-                        endpoint_history = root_history + [endpoint]
-                        first_value = _sidecar_value(sidecar, endpoint_history)
-                        second_value = _sidecar_value(sidecar, endpoint_history)
-                        bootstrap = branch_reward if terminal else branch_reward + args.gamma * first_value
-                        endpoint_state = env.get_state()
-                        continuation_returns = []
-                        for repeat in range(args.continuation_repeats):
-                            env.load_state(endpoint_state)
-                            continuation_obs = endpoint; continuation_reward = 0.0; discount = 1.0; done = terminal
-                            # Same frozen SFT weights.  The repeat seed changes
-                            # only policy sampling, quantifying continuation
-                            # stochasticity instead of hiding it in one roll.
-                            continuation_seed = args.seed + 100000 * current_chunk + 1000 * candidate + repeat
-                            while not done and int(env.elapsed_steps[0]) < int(cfg.env.train.max_episode_steps):
-                                follow = _sample_action(model, continuation_obs, continuation_seed + int(env.elapsed_steps[0]))
-                                continuation_obs, reward, done = _chunk(env, follow)
-                                continuation_reward += discount * reward; discount *= args.gamma
-                            continuation_returns.append(continuation_reward)
-                        branch_rows_by_candidate[candidate] = {
-                            "candidate": candidate, "branch_reward": branch_reward, "terminal": terminal,
-                            "execution_position": execution_position,
-                            "bootstrap_target": bootstrap, "endpoint_value_first": first_value,
-                            "endpoint_value_repeat_absdiff": abs(first_value - second_value),
-                            "endpoint_input_fingerprint": _endpoint_fingerprint(endpoint),
-                            "action_fingerprint": _action_fingerprint(action), "continuation_returns": continuation_returns,
-                            "continuation_mean": float(np.mean(continuation_returns)), "continuation_std": float(np.std(continuation_returns)),
-                        }
-                finally:
-                    env.load_state(root)
-                if any(row is None for row in branch_rows_by_candidate):
-                    raise RuntimeError("candidate execution did not produce one row per candidate")
-                # Preserve candidate identity for ranking; execution position
-                # remains an explicit diagnostic field instead of silently
-                # becoming a candidate-index confounder.
-                branch_rows = [row for row in branch_rows_by_candidate if row is not None]
-                bootstrap = np.asarray([row["bootstrap_target"] for row in branch_rows])
-                continuation = np.asarray([row["continuation_mean"] for row in branch_rows])
-                repeat_controls = []
-                for left in range(len(branch_rows)):
-                    for right in range(left + 1, len(branch_rows)):
-                        if branch_rows[left]["action_fingerprint"] == branch_rows[right]["action_fingerprint"]:
-                            repeat_controls.append({
-                                "candidates": [left, right],
-                                "endpoint_components_equal": {
-                                    key: branch_rows[left]["endpoint_input_fingerprint"][key] == branch_rows[right]["endpoint_input_fingerprint"][key]
-                                    for key in branch_rows[left]["endpoint_input_fingerprint"]
-                                },
-                                "bootstrap_absdiff": abs(branch_rows[left]["bootstrap_target"] - branch_rows[right]["bootstrap_target"]),
-                                "value_absdiff": abs(branch_rows[left]["endpoint_value_first"] - branch_rows[right]["endpoint_value_first"]),
-                            })
-                reports.append({"chunk_index": current_chunk, "elapsed_control_steps": int(env.elapsed_steps[0]),
-                                "root_input_fingerprint": root_input_fingerprint,
-                                "root_snapshot_fingerprint": root_snapshot_fingerprint,
-                                "branches": branch_rows,
-                                "repeat_controls": repeat_controls, "ranking": _rank_metrics(bootstrap, continuation, args.tie_eps)})
+                    if any(row is None for row in branch_rows_by_candidate):
+                        raise RuntimeError("candidate execution did not produce one row per candidate")
+                    # Preserve candidate identity for ranking; execution position
+                    # remains an explicit diagnostic field instead of silently
+                    # becoming a candidate-index confounder.
+                    branch_rows = [row for row in branch_rows_by_candidate if row is not None]
+                    bootstrap = np.asarray([row["bootstrap_target"] for row in branch_rows])
+                    continuation = np.asarray([row["continuation_mean"] for row in branch_rows])
+                    repeat_controls = []
+                    for left in range(len(branch_rows)):
+                        for right in range(left + 1, len(branch_rows)):
+                            if branch_rows[left]["action_fingerprint"] == branch_rows[right]["action_fingerprint"]:
+                                repeat_controls.append({
+                                    "candidates": [left, right],
+                                    "endpoint_components_equal": {
+                                        key: branch_rows[left]["endpoint_input_fingerprint"][key] == branch_rows[right]["endpoint_input_fingerprint"][key]
+                                        for key in branch_rows[left]["endpoint_input_fingerprint"]
+                                    },
+                                    "bootstrap_absdiff": abs(branch_rows[left]["bootstrap_target"] - branch_rows[right]["bootstrap_target"]),
+                                    "value_absdiff": abs(branch_rows[left]["endpoint_value_first"] - branch_rows[right]["endpoint_value_first"]),
+                                })
+                    reports.append({"chunk_index": current_chunk, "elapsed_control_steps": int(env.elapsed_steps[0]),
+                                    "execution_order_index": order_index, "candidate_execution_order": execution_order,
+                                    "root_input_fingerprint": root_input_fingerprint,
+                                    "root_snapshot_fingerprint": root_snapshot_fingerprint,
+                                    "branches": branch_rows,
+                                    "repeat_controls": repeat_controls, "ranking": _rank_metrics(bootstrap, continuation, args.tie_eps)})
             if current_chunk == max(target_chunks):
                 break
             action = _sample_action(model, observation, args.seed + current_chunk)
@@ -242,7 +266,7 @@ def main() -> None:
                              "continuation_target": "R_branch + gamma * fixed-SFT discounted continuation return",
                              "state_selection": "time-stratified; no oracle state input", "gamma": args.gamma},
               "aggregate": aggregate, "state_reports": reports}
-    result["protocol"]["candidate_execution_order"] = execution_order
+    result["protocol"]["candidate_execution_orders"] = execution_orders
     args.output.parent.mkdir(parents=True, exist_ok=True); args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2), flush=True)
 
