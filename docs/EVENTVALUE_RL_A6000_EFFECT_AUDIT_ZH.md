@@ -420,6 +420,7 @@ policy_relative_transport_v3/
 | `d27b4cd6` | 验证每一个 cache RGB boundary frame |
 | `3fe8af10` | Influence 使用全部 matched branch candidates，并保存 Event representation |
 | `e6f7b1e1` | 新增 grouped offline Influence 训练/验证工具 |
+| `d8e001e6` | 对齐 bootstrap 尾 chunk 的 policy reference，并为审计保存可用性掩码 |
 
 运行脚本 `examples/embodiment/run_robotwin_event_branch_a6000_smoke.sh` 也补充：可覆盖 checkpoint/output 路径、action chunk、branch interval、sidecar 学习开关，并显式提供 Curobo/PATH 给 A6000 Ray worker。
 
@@ -437,7 +438,7 @@ git push user event-smdp-credit
 
 1. **已完成：A6000 接入回归。** 参考 action transport、chunk/token 清理、完整 rollout 和冻结 PPO update 都已运行通过；没有 reference action 时，未来 `max_lambda>0` 配置会拒绝启动。
 2. **已完成第一轮：执行顺序审计。** 现在有同进程、同 root、branch-only 的三状态结果；它只定义了噪声处理需求，尚不足以判定系统性 position bias。
-3. **当前执行：预注册独立 episode 验证。** 用 `make_robotwin_branch_seed_split.py` 从官方 train seed manifest 固定抽取 32 条互不重叠的 reset seed：16 train、8 validation、8 test；三个集合写为独立的 RLinf-compatible seed 文件。既有 4 条 episode 仅保留为开发数据，不能进入最终 test。
+3. **当前执行：预注册独立 episode 验证。** 用 `make_robotwin_branch_seed_split.py` 从官方 train seed manifest 固定抽取 32 条互不重叠的 reset seed：16 train、8 validation、8 test；三个集合写为独立的 RLinf-compatible seed 文件。既有 4 条 episode 仅保留为开发数据，不能进入最终 test。2026-09-23 的首次正式采集暴露 rollout 在 terminal bootstrap 处拥有一个没有同观测 reference action 的尾 chunk（branch 时钟 40、reference 时钟 39）。这不是缺失真实数据的可静默忽略情形：修复仅为该尾行显式补齐占位、写入 `policy_reference_available=false`，审计与未来非零 credit 都排除该行。随后 A6000 单 rollout probe 已成功完成，并写出 4 个 branch state、每行 8 个有效 reference actions；正式数据从 `train_v2` 目录重新开始采集。
 4. **冻结标签生成器后收集并评估。** 固定 Observer、RGB student、target Event Value、chunk=5、gamma=.99、state-centered MSE 与 `lambda=0`；每个 episode 按预设 branch interval 抽取少量 state。新 artifact 保存全部 state、重复 candidate noise、candidate action、state ID 和 8 个非执行 policy reference action。先用 train 拟合 Influence，validation 选 checkpoint，test 只报告一次 LOEO/pairwise/Kendall-\(\tau_b\)/top-1 regret/shuffle 对照。
 5. **reference 与 continuation 校验。** 用 `audit_policy_reference_stability.py` 以 2/4/8 个保存的 reference action 估计 \(\hat I\) 数值与符号稳定性；在 test 的预定子集执行固定 SFT continuation，且对续跑方差接近候选差异的 pair 标为不确定或增加重复次数。
 6. **通过预注册门槛后才开始 PPO 混合。** 至少预先定义 held-out pairwise、Kendall-\(\tau_b\)、top-1 regret 相对随机/zero control 的门槛；之后以 `lambda: 0 → 0.1 → 0.25` 的保守 schedule 做 paired GAE 对照。原 PPO critic target 始终保持 GAE。
@@ -466,3 +467,5 @@ git push user event-smdp-credit
 | all-candidate calibration raw branches | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/calibration_all_candidates_raw` |
 | offline Influence report | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/influence_offline/report.json` |
 | A6000 runtime log | `/home/chefmate/Data/pirl_a6000_run/logs/event_chunk5_calibration_all_candidates.log` |
+| 独立 split manifest | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_seed_split_v1/manifest.json` |
+| 当前独立 train 采集 | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_branch_validation_v1/train_v2/` |
