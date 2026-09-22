@@ -94,11 +94,14 @@ def restore_robotwin_env(env: Any, state_buffer: bytes) -> None:
                 _restore_subenv(subenv, saved)
         for name, value in (("prev_step_reward", payload["prev_step_reward"]),
                             ("_elapsed_steps", payload["elapsed_steps"]),
-                            ("success_once", payload["success_once"]),
-                            ("fail_once", payload["fail_once"]),
-                            ("returns", payload["returns"])):
+            ("success_once", payload["success_once"]),
+            ("fail_once", payload["fail_once"]),
+            ("returns", payload["returns"])):
             if value is not None:
-                setattr(env, name, value.to(env.device))
+                # Do not alias the serialized payload on CPU: subsequent
+                # in-place environment bookkeeping would otherwise corrupt
+                # the very snapshot used for the next branch candidate.
+                setattr(env, name, value.to(env.device).clone())
         env.is_start = bool(payload["is_start"])
         random.setstate(payload["python_rng"])
         np.random.set_state(payload["numpy_rng"])
