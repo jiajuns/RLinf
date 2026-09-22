@@ -43,6 +43,9 @@ export ROBOTWIN_MICRO_BATCH="${ROBOTWIN_MICRO_BATCH:-2}"
 export ROBOTWIN_BRANCH_COLLECT_EPOCHS="${ROBOTWIN_BRANCH_COLLECT_EPOCHS:-1}"
 export ROBOTWIN_ACTION_CHUNK="${ROBOTWIN_ACTION_CHUNK:-50}"
 export ROBOTWIN_BRANCH_INTERVAL="${ROBOTWIN_BRANCH_INTERVAL:-10}"
+export ROBOTWIN_EVENT_VALUE_LR="${ROBOTWIN_EVENT_VALUE_LR:-0.0}"
+export ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY="${ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY:-true}"
+export ROBOTWIN_EVENT_DIAGNOSTIC_FREEZE="${ROBOTWIN_EVENT_DIAGNOSTIC_FREEZE:-true}"
 
 mkdir -p "${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" "${ROBOTWIN_LOG_PATH}" "${RLINF_RAY_TMPDIR}"
 sidecar_resume_args=()
@@ -68,10 +71,10 @@ fi
   "${sidecar_resume_args[@]}" \
   +algorithm.event_sidecar.target_ema_decay=0.995 +algorithm.event_sidecar.proprio_time_delta="${ROBOTWIN_ACTION_CHUNK}" +algorithm.event_sidecar.online_mount_token=2 +algorithm.event_sidecar.bootstrap_on_truncation=false \
   +algorithm.event_sidecar.strict_input_contract=true \
-  +algorithm.event_sidecar.value_lr=0.0 \
+  +algorithm.event_sidecar.value_lr="${ROBOTWIN_EVENT_VALUE_LR}" \
   +algorithm.event_diagnostics.output_dir="${ROBOTWIN_EVENT_DIAGNOSTIC_DIR}" \
-  +algorithm.event_diagnostics.record_only=true \
-  +algorithm.event_diagnostics.freeze_sidecars=true \
+  +algorithm.event_diagnostics.record_only="${ROBOTWIN_EVENT_DIAGNOSTIC_RECORD_ONLY}" \
+  +algorithm.event_diagnostics.freeze_sidecars="${ROBOTWIN_EVENT_DIAGNOSTIC_FREEZE}" \
   +algorithm.event_branch.num_candidates=4 +algorithm.event_branch.chunk_interval="${ROBOTWIN_BRANCH_INTERVAL}" \
   +algorithm.event_branch.execution_unit=full_action_chunk +algorithm.event_branch.repeat_primary_candidates=1 +algorithm.event_branch.min_supervision=999999 \
   +algorithm.event_branch.influence_lr=1.0e-4 \
