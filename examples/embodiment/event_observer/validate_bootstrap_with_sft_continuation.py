@@ -117,6 +117,12 @@ def main() -> None:
                         help="Comma-separated 5-step chunk indices; time-stratified without oracle state input.")
     parser.add_argument("--candidates", type=int, default=2)
     parser.add_argument("--continuation-repeats", type=int, default=1)
+    parser.add_argument(
+        "--skip-continuation",
+        action="store_true",
+        help=("Execute only short branches. Use with multiple execution orders to isolate "
+              "immediate branch-position effects from later policy continuation RNG/state."),
+    )
     parser.add_argument("--gamma", type=float, default=.99)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--tie-eps", type=float, default=1e-4)
@@ -199,18 +205,19 @@ def main() -> None:
                             bootstrap = branch_reward if terminal else branch_reward + args.gamma * first_value
                             endpoint_state = env.get_state()
                             continuation_returns = []
-                            for repeat in range(args.continuation_repeats):
-                                env.load_state(endpoint_state)
-                                continuation_obs = endpoint; continuation_reward = 0.0; discount = 1.0; done = terminal
-                                # Same frozen SFT weights.  The repeat seed changes
-                                # only policy sampling, quantifying continuation
-                                # stochasticity instead of hiding it in one roll.
-                                continuation_seed = args.seed + 100000 * current_chunk + 1000 * candidate + repeat
-                                while not done and int(env.elapsed_steps[0]) < int(cfg.env.train.max_episode_steps):
-                                    follow = _sample_action(model, continuation_obs, continuation_seed + int(env.elapsed_steps[0]))
-                                    continuation_obs, reward, done = _chunk(env, follow)
-                                    continuation_reward += discount * reward; discount *= args.gamma
-                                continuation_returns.append(continuation_reward)
+                            if not args.skip_continuation:
+                                for repeat in range(args.continuation_repeats):
+                                    env.load_state(endpoint_state)
+                                    continuation_obs = endpoint; continuation_reward = 0.0; discount = 1.0; done = terminal
+                                    # Same frozen SFT weights.  The repeat seed changes
+                                    # only policy sampling, quantifying continuation
+                                    # stochasticity instead of hiding it in one roll.
+                                    continuation_seed = args.seed + 100000 * current_chunk + 1000 * candidate + repeat
+                                    while not done and int(env.elapsed_steps[0]) < int(cfg.env.train.max_episode_steps):
+                                        follow = _sample_action(model, continuation_obs, continuation_seed + int(env.elapsed_steps[0]))
+                                        continuation_obs, reward, done = _chunk(env, follow)
+                                        continuation_reward += discount * reward; discount *= args.gamma
+                                    continuation_returns.append(continuation_reward)
                             branch_rows_by_candidate[candidate] = {
                                 "candidate": candidate, "branch_reward": branch_reward, "terminal": terminal,
                                 "execution_position": execution_position,
@@ -218,7 +225,8 @@ def main() -> None:
                                 "endpoint_value_repeat_absdiff": abs(first_value - second_value),
                                 "endpoint_input_fingerprint": _endpoint_fingerprint(endpoint),
                                 "action_fingerprint": _action_fingerprint(action), "continuation_returns": continuation_returns,
-                                "continuation_mean": float(np.mean(continuation_returns)), "continuation_std": float(np.std(continuation_returns)),
+                                "continuation_mean": float(np.mean(continuation_returns)) if continuation_returns else None,
+                                "continuation_std": float(np.std(continuation_returns)) if continuation_returns else None,
                             }
                     finally:
                         env.load_state(root)
@@ -229,7 +237,8 @@ def main() -> None:
                     # becoming a candidate-index confounder.
                     branch_rows = [row for row in branch_rows_by_candidate if row is not None]
                     bootstrap = np.asarray([row["bootstrap_target"] for row in branch_rows])
-                    continuation = np.asarray([row["continuation_mean"] for row in branch_rows])
+                    continuation_available = all(row["continuation_mean"] is not None for row in branch_rows)
+                    continuation = np.asarray([row["continuation_mean"] for row in branch_rows]) if continuation_available else None
                     repeat_controls = []
                     for left in range(len(branch_rows)):
                         for right in range(left + 1, len(branch_rows)):
@@ -248,7 +257,8 @@ def main() -> None:
                                     "root_input_fingerprint": root_input_fingerprint,
                                     "root_snapshot_fingerprint": root_snapshot_fingerprint,
                                     "branches": branch_rows,
-                                    "repeat_controls": repeat_controls, "ranking": _rank_metrics(bootstrap, continuation, args.tie_eps)})
+                                    "repeat_controls": repeat_controls,
+                                    "ranking": _rank_metrics(bootstrap, continuation, args.tie_eps) if continuation_available else None})
             if current_chunk == max(target_chunks):
                 break
             action = _sample_action(model, observation, args.seed + current_chunk)
@@ -257,13 +267,16 @@ def main() -> None:
                 break
     finally:
         env.offload()
-    aggregate = {"states": len(reports), "pairwise_eligible": int(sum(row["ranking"]["eligible"] for row in reports)),
-                 "pairwise_concordant": int(sum(row["ranking"]["concordant"] for row in reports)),
-                 "pairwise_discordant": int(sum(row["ranking"]["discordant"] for row in reports))}
+    ranked_reports = [row for row in reports if row["ranking"] is not None]
+    aggregate = {"states": len(reports), "ranked_states": len(ranked_reports),
+                 "pairwise_eligible": int(sum(row["ranking"]["eligible"] for row in ranked_reports)),
+                 "pairwise_concordant": int(sum(row["ranking"]["concordant"] for row in ranked_reports)),
+                 "pairwise_discordant": int(sum(row["ranking"]["discordant"] for row in ranked_reports))}
     aggregate["pairwise_accuracy_non_tied"] = aggregate["pairwise_concordant"] / max(aggregate["pairwise_eligible"], 1)
     result = {"protocol": {"policy": "frozen pi0.5 SFT", "action_chunk_control_steps": 5,
                              "branch_target": "R_branch + gamma * target_EventValue(endpoint)",
                              "continuation_target": "R_branch + gamma * fixed-SFT discounted continuation return",
+                             "continuation_collected": not args.skip_continuation,
                              "state_selection": "time-stratified; no oracle state input", "gamma": args.gamma},
               "aggregate": aggregate, "state_reports": reports}
     result["protocol"]["candidate_execution_orders"] = execution_orders
