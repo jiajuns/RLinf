@@ -358,6 +358,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         branch_truncations: torch.Tensor,
         branch_state_ids: torch.Tensor,
         branch_actions: torch.Tensor,
+        state_representations: torch.Tensor,
     ) -> None:
         """Persist raw matched-state branch diagnostics for offline auditing.
 
@@ -379,6 +380,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             raise RuntimeError("diagnostic valid-sample mask is not aligned to branch returns")
         if branch_state_ids.shape[:2] != branch_returns.shape[:2] or branch_state_ids.shape[-1] < 2:
             raise RuntimeError("diagnostic cloned-state identity must include seed and elapsed-step columns")
+        if state_representations.shape[:2] != branch_returns.shape[:2] or state_representations.ndim != 3:
+            raise RuntimeError("diagnostic Event representations are not aligned to branch returns")
         selected = branch_mask.bool()
         if not bool(selected.any()):
             return
@@ -447,6 +450,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             branch_terminations=branch_terminations[selected].detach().cpu().numpy(),
             branch_truncations=branch_truncations[selected].detach().cpu().numpy(),
             state_ids=branch_state_ids[selected].detach().cpu().numpy(),
+            # A frozen online-capable Event representation is sufficient to
+            # train/validate I_xi offline; raw RGB or simulator oracle state
+            # is deliberately not written into branch diagnostics.
+            state_representations=state_representations[selected].detach().float().cpu().numpy(),
             # Files contain only selected valid branch states; retain an
             # explicit row mask so downstream readers need not infer that
             # contract from filename conventions.
@@ -600,10 +607,28 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     candidate_representations = representations.unsqueeze(2).expand(
                         -1, -1, candidate_actions.shape[2], -1
                     )
-                    with torch.no_grad():
-                        candidate_scores = self._event_influence_model(
-                            candidate_representations, candidate_actions
-                        ).permute(1, 0, 2)
+                    candidate_scores = self._event_influence_model(
+                        candidate_representations, candidate_actions
+                    ).permute(1, 0, 2)
+                    # Each Flow-SDE candidate is a real intervention outcome
+                    # from the *same* restored state.  Training only on
+                    # candidate zero leaves three quarters of that costly
+                    # supervision unused and cannot validate a candidate
+                    # ranking.  Regress every valid candidate to its centered
+                    # matched-state return; candidate zero remains the PPO
+                    # action queried by ``prediction`` below.
+                    candidate_target = branch_returns - matched_mean.unsqueeze(-1)
+                    candidate_supervision_mask = (
+                        mask.unsqueeze(-1)
+                        & branch_valid
+                        & (valid_count.unsqueeze(-1) >= 2)
+                    )
+                    if bool(candidate_supervision_mask.any()):
+                        local_loss_sum = (candidate_scores - candidate_target).square().masked_select(
+                            candidate_supervision_mask
+                        ).sum()
+                        local_supervision_count = int(candidate_supervision_mask.sum().item())
+                        local_outcome_count = local_supervision_count
                     self._write_event_branch_diagnostics(
                         sidecar_rollout=sidecar_rollout,
                         branch_returns=branch_returns,
@@ -621,6 +646,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         branch_truncations=branch_truncations,
                         branch_state_ids=branch_state_ids,
                         branch_actions=self.rollout_batch["branch_actions"].to(device),
+                        state_representations=representations.permute(1, 0, 2),
                     )
                 elif self.cfg.algorithm.get("event_diagnostics", {}).get("output_dir", None):
                     raise RuntimeError(

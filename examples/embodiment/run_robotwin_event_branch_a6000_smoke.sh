@@ -11,14 +11,19 @@ export REPO_PATH="${REPO_PATH:-${A6000_ROOT}/RLinf-piRL}"
 export ROBOTWIN_PATH="${A6000_ROOT}/RoboTwin-RLinf_support"
 export ROBOTWIN_ASSETS_PATH="${A6000_ROOT}/RoboTwin_v14_dual_gpu_20260831"
 export ROBOTWIN_PI05_MODEL="${A6000_ROOT}/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
-export ROBOTWIN_EVENT_OBSERVER_CKPT="${A6000_ROOT}/robotwin_adjust_bottle_event_pretrain_v1_200plus/best.pt"
-export ROBOTWIN_EVENT_RGB_STUDENT_CKPT="${A6000_ROOT}/robotwin_adjust_bottle_rgb_student_v1_200plus/best.pt"
+# Keep RoboTwin's motion planner identical to the known-good HPC runtime.
+# Curobo is source-installed on this diagnostic host, so adding its ``src``
+# directory is sufficient and avoids an editable installation tied to a
+# copied virtualenv's broken pip launcher.
+export ROBOTWIN_CUROBO_PATH="${ROBOTWIN_CUROBO_PATH:-${A6000_ROOT}/runtime/curobo/src}"
+export ROBOTWIN_EVENT_OBSERVER_CKPT="${ROBOTWIN_EVENT_OBSERVER_CKPT:-${A6000_ROOT}/robotwin_adjust_bottle_event_pretrain_v1_200plus/best.pt}"
+export ROBOTWIN_EVENT_RGB_STUDENT_CKPT="${ROBOTWIN_EVENT_RGB_STUDENT_CKPT:-${A6000_ROOT}/robotwin_adjust_bottle_rgb_student_v1_200plus/best.pt}"
 # A resumed sidecar is optional.  A collection used to calibrate a freshly
 # trained Observer must not silently overwrite its Event Value with an older,
 # incompatible sidecar checkpoint.
 export ROBOTWIN_EVENT_SIDECAR_RESUME="${ROBOTWIN_EVENT_SIDECAR_RESUME:-}"
-export ROBOTWIN_EVENT_DIAGNOSTIC_DIR="${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smoke/raw"
-export ROBOTWIN_LOG_PATH="${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smoke"
+export ROBOTWIN_EVENT_DIAGNOSTIC_DIR="${ROBOTWIN_EVENT_DIAGNOSTIC_DIR:-${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smoke/raw}"
+export ROBOTWIN_LOG_PATH="${ROBOTWIN_LOG_PATH:-${A6000_ROOT}/outputs/robotwin_event_branch_a6000_smoke}"
 
 # All actor/env/rollout components share GPU 0.  Keep this intentionally
 # small; increasing it is allowed only after this preflight reports peak VRAM.
@@ -29,7 +34,11 @@ unset RAY_ADDRESS
 # on the 290-GB data disk rather than under /tmp.
 export RLINF_RAY_TMPDIR="${RLINF_RAY_TMPDIR:-${A6000_ROOT}/ray_tmp}"
 export EMBODIED_PATH="${REPO_PATH}/examples/embodiment"
-export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_PATH}:${ROBOTWIN_PATH}:${ROBOTWIN_CUROBO_PATH}:${PYTHONPATH:-}"
+# Torch loads Curobo's CUDA extensions lazily in Ray workers.  The A6000
+# environment installs Ninja under the account-local bin directory, which is
+# not in non-interactive SSH's default PATH.
+export PATH="${HOME}/.local/bin:${PATH}"
 export HYDRA_FULL_ERROR=1
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
