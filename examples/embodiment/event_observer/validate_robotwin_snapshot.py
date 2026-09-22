@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import pickle
 from pathlib import Path
 
 import torch
@@ -28,6 +30,24 @@ def image_mismatch_fraction(left: dict, right: dict) -> dict[str, float]:
         a, b = left.get(key), right.get(key)
         if a is not None and b is not None:
             result[key] = float((a.cpu() != b.cpu()).float().mean())
+    return result
+
+
+def snapshot_component_hashes(state: bytes) -> dict[str, str]:
+    """Debug identity without treating a whole pickle as a physics oracle."""
+    payload = pickle.loads(state)
+    result = {
+        "python_rng": hashlib.sha256(pickle.dumps(payload["python_rng"])).hexdigest()[:12],
+        "numpy_rng": hashlib.sha256(pickle.dumps(payload["numpy_rng"])).hexdigest()[:12],
+        "torch_rng": hashlib.sha256(payload["torch_rng"].numpy().tobytes()).hexdigest()[:12],
+    }
+    for index, subenv in enumerate(payload["subenv_states"]):
+        result[f"physics_{index}"] = hashlib.sha256(subenv["physics"]).hexdigest()[:12]
+        result[f"task_fields_{index}"] = hashlib.sha256(
+            pickle.dumps(subenv["task_fields"], protocol=pickle.HIGHEST_PROTOCOL)
+        ).hexdigest()[:12]
+    for key in ("prev_step_reward", "elapsed_steps", "success_once", "fail_once", "returns", "is_start"):
+        result[key] = hashlib.sha256(pickle.dumps(payload.get(key))).hexdigest()[:12]
     return result
 
 
@@ -77,8 +97,15 @@ def main() -> None:
         # rollout exactly to its pre-branch state before PPO continues.
         pre_branch_snapshot = env.get_state()
         branch = env.branch_step(repeated_actions)
-        if env.get_state() != pre_branch_snapshot:
-            raise AssertionError("branch_step changed the live RoboTwin rollout state")
+        post_branch_snapshot = env.get_state()
+        pre_branch_hashes = snapshot_component_hashes(pre_branch_snapshot)
+        post_branch_hashes = snapshot_component_hashes(post_branch_snapshot)
+        changed_components = {
+            key: (pre_branch_hashes[key], post_branch_hashes[key])
+            for key in pre_branch_hashes if pre_branch_hashes[key] != post_branch_hashes[key]
+        }
+        if changed_components:
+            raise AssertionError(f"branch_step changed live snapshot components: {changed_components}")
         if not bool(branch["branch_mask"].all()) or branch["branch_measured_state16"].shape != (1, 2, 16):
             raise AssertionError("matched-state branch did not return measured state")
         if not branch["branch_requested_steps"].eq(action_chunk).all() or not branch["branch_horizons"].le(action_chunk).all():
