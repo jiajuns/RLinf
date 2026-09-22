@@ -71,23 +71,54 @@ def _validation_mask(groups: np.ndarray, fraction: float) -> np.ndarray:
 def _ranking_metrics(true_values: torch.Tensor, predicted_values: torch.Tensor, tie_eps: float) -> dict[str, float]:
     truth = true_values.detach().cpu().numpy()
     prediction = predicted_values.detach().cpu().numpy()
-    eligible = concordant = 0
+    centered = truth - truth.mean(axis=1, keepdims=True)
+    eligible = concordant = discordant = predicted_ties = true_ties = 0
     regrets = []
     for target, score in zip(truth, prediction, strict=True):
         for left in range(len(target)):
             for right in range(left + 1, len(target)):
                 delta = target[left] - target[right]
+                predicted_delta = score[left] - score[right]
                 if abs(float(delta)) <= tie_eps:
+                    true_ties += 1
                     continue
                 eligible += 1
-                if np.sign(delta) == np.sign(score[left] - score[right]):
+                if abs(float(predicted_delta)) <= tie_eps:
+                    predicted_ties += 1
+                elif np.sign(delta) == np.sign(predicted_delta):
                     concordant += 1
+                else:
+                    discordant += 1
         regrets.append(float(target.max() - target[np.argmax(score)]))
+    denominator = np.sqrt((concordant + discordant + true_ties) * (concordant + discordant + predicted_ties))
+    zero_mse = float(np.mean(centered**2))
+    model_mse = float(np.mean((prediction - centered) ** 2))
     return {
         "tie_aware_pairwise_accuracy": float(concordant / eligible) if eligible else float("nan"),
         "top1_regret_mean": float(np.mean(regrets)),
         "eligible_pairs": float(eligible),
+        "concordant": float(concordant),
+        "discordant": float(discordant),
+        "predicted_ties": float(predicted_ties),
+        "true_ties": float(true_ties),
+        "kendall_tau_b": float((concordant - discordant) / denominator) if denominator else float("nan"),
+        "zero_predictor_mse": zero_mse,
+        "model_mse": model_mse,
+        "model_vs_zero_mse_ratio": model_mse / max(zero_mse, np.finfo(np.float64).eps),
     }
+
+
+def _statewise_shuffle_baseline(
+    true_values: torch.Tensor, predicted_values: torch.Tensor, tie_eps: float, rng: np.random.Generator, trials: int
+) -> dict[str, float]:
+    """Break candidate correspondence while preserving each state's score distribution."""
+    scores = predicted_values.detach().cpu().numpy()
+    values = []
+    for _ in range(trials):
+        shuffled = np.stack([row[rng.permutation(len(row))] for row in scores])
+        values.append(_ranking_metrics(true_values, torch.from_numpy(shuffled), tie_eps))
+    keys = ("tie_aware_pairwise_accuracy", "kendall_tau_b", "top1_regret_mean")
+    return {f"random_statewise_{key}_mean": float(np.nanmean([item[key] for item in values])) for key in keys}
 
 
 def main() -> None:
@@ -101,6 +132,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--validation-fraction", type=float, default=.25)
     parser.add_argument("--tie-eps", type=float, default=1e-4)
+    parser.add_argument("--random-trials", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     if not 0 < args.validation_fraction < 1 or args.epochs < 1:
@@ -118,9 +150,11 @@ def main() -> None:
     model = EventInfluenceModel(representations.shape[-1], actions.shape[-1], hidden_dim=hidden_dim)
     model.load_state_dict(payload["influence_model"])
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    train = TensorDataset(
-        torch.from_numpy(representations[~validation]), torch.from_numpy(actions[~validation]), torch.from_numpy(targets[~validation])
-    )
+    train_rep = torch.from_numpy(representations[~validation])
+    train_actions = torch.from_numpy(actions[~validation])
+    train_targets = torch.from_numpy(targets[~validation])
+    train_returns = torch.from_numpy(outcomes[~validation])
+    train = TensorDataset(train_rep, train_actions, train_targets)
     loader = DataLoader(train, batch_size=args.batch_size, shuffle=True)
     val_rep = torch.from_numpy(representations[validation])
     val_actions = torch.from_numpy(actions[validation])
@@ -134,10 +168,15 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
         model.eval()
         with torch.no_grad():
+            train_prediction = model(train_rep.unsqueeze(1).expand(-1, train_actions.shape[1], -1), train_actions)
             prediction = model(val_rep.unsqueeze(1).expand(-1, val_actions.shape[1], -1), val_actions)
             value_loss = float(EventInfluenceModel.loss(prediction, val_targets))
+            train_ranking = _ranking_metrics(train_returns, train_prediction, args.tie_eps)
             ranking = _ranking_metrics(val_returns, prediction, args.tie_eps)
-        history.append({"epoch": epoch, "validation_mse": value_loss, **ranking})
+            random_baseline = _statewise_shuffle_baseline(
+                val_returns, prediction, args.tie_eps, np.random.default_rng(args.seed + epoch), args.random_trials
+            )
+        history.append({"epoch": epoch, "train": train_ranking, "validation": ranking, "validation_random_baseline": random_baseline})
         if value_loss < best:
             best = value_loss
             best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
@@ -145,13 +184,18 @@ def main() -> None:
     model.load_state_dict(best_state)
     payload["influence_model"] = model.state_dict()
     payload["influence_optimizer"] = optimizer.state_dict()
+    best_metrics = history[int(np.argmin([row["validation"]["model_mse"] for row in history]))]
     payload["offline_influence_training"] = {
         "diagnostics": str(args.diagnostics), "states": int(len(outcomes)), "train_states": int((~validation).sum()),
-        "validation_states": int(validation.sum()), "best_validation_mse": best, "best_epoch": int(np.argmin([row["validation_mse"] for row in history])),
+        "validation_states": int(validation.sum()), "best_validation_mse": best,
+        "best_epoch": int(np.argmin([row["validation"]["model_mse"] for row in history])),
     }
     args.output_sidecar.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, args.output_sidecar)
-    report = {"split_groups": {"train": sorted(map(int, np.unique(groups[~validation]))), "validation": sorted(map(int, np.unique(groups[validation])))}, "history": history, **payload["offline_influence_training"]}
+    report = {
+        "split_groups": {"train": sorted(map(int, np.unique(groups[~validation]))), "validation": sorted(map(int, np.unique(groups[validation])))},
+        "best_epoch_metrics": best_metrics, "history": history, **payload["offline_influence_training"],
+    }
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2), flush=True)

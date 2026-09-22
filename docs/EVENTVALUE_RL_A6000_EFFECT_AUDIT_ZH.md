@@ -254,7 +254,7 @@ train_influence_from_branch_diagnostics.py
 | eligible non-tie pairs | 106 |
 | top-1 regret mean | 0.000410 |
 
-**结论：失败。** 该排序低于随机水平，MSE 的下降主要反映中心化 return 的小尺度，而不是模型学到了候选动作优劣。当前 Influence Model 不应接管、也不应重新分配 PPO advantage。
+**当前验证未通过。** 该模型尚未展示可用的跨 episode 候选排序；MSE 的下降可能主要反映中心化 return 的小尺度，而不是模型学到了候选动作优劣。此处的 0.3019 尚未分解 predicted ties/concordant/discordant，也尚未与状态内随机对应基准比较，因而不能据此声称模型“反向排序”，更不能说明 branch 标签本身无用。当前 Influence Model 不应接管、也不应重新分配 PPO advantage。
 
 离线产物：
 
@@ -272,13 +272,13 @@ influence_offline/report.json
 1. **接口正确性得到较强支持。** chunk 时间单位、独立 Value target、GAE 隔离、snapshot 恢复、sidecar 存档与单环境真实 RoboTwin rollout 均已经跑通。
 2. **Observer/RGB student 在修复后 cache 上已完成任务匹配训练。** 这不等价于泛化能力或在线端到端成功。
 3. **真实 candidate branches 有微弱但可测的 return spread。** 相比重复动作差异，平均候选差异约高一个数量级；但仍有不少 near-tie state，且 branch target 主要由短期 bootstrap 构成。
-4. **Influence 排序无效。** 即使用全部 candidate labels、episode-level heldout 和 100 epoch 离线训练，pairwise accuracy 仍为 0.302。
+4. **当前 Influence 尚未证明排序有效。** 即使用全部 candidate labels、episode-level heldout 和 100 epoch 离线训练，当前定义的 pairwise accuracy 为 0.302；还须用训练集拟合、tie-aware 分解和随机基准定位是优化、泛化、表示还是标签问题。
 5. **没有 EventValue-RL 成功率提升可报告。** 没有启动 Event-PPO，也不能把任何 `success_once` 当作 Ours 的性能。
 
 因此，当前唯一严谨的实验状态是：
 
 \[
-\boxed{\text{Event branch pipeline works, but its current Value/Influence target is not a useful action-ranking signal.}}
+\boxed{\text{Event branch pipeline works, but the current Influence model has not yet demonstrated useful held-out action ranking.}}
 \]
 
 ## 10. 当前代码改动
@@ -310,12 +310,13 @@ git push user event-smdp-credit
 
 不要直接扩训练或开启 `lambda>0`。优先级应为：
 
-1. **先验证 (V_E) target 本身。** 对固定 SFT 的一部分 branch endpoint，让策略继续执行至 episode 结束，比较 `R_branch + γ V_E` 的排序与真实剩余折扣回报；目前 branch outcome 主要依赖 learned bootstrap，尚未证明它是任务回报的可靠 proxy。
-2. **提高候选可辨识性而非盲目增加状态数。** 在接触、姿态调整、临近完成/失败恢复等关键状态采样；比较更有差异的 Flow-SDE candidates、合理延长 branch horizon，且将实际 branch transitions 计入总 interaction budget。
-3. **重复动作噪声基线要逐 state 使用。** 只有不同 candidate spread 明显高于同动作重复波动的 state 才进入 Influence 训练/评价；保持 tie-aware 指标。
-4. **重新收集 train / heldout episode group。** 当前只有四个 seed group，不能作为最终统计。应收集数百 state、更多独立 reset seeds，并冻结 Observer、RGB student、target Event Value 后训练/测试 Influence。
-5. **通过门槛后才开始 PPO 混合。** 至少预先定义并达到 heldout pairwise accuracy、Kendall-\(\tau_b\)、top-1 regret 相对随机/zero control 的门槛；之后以 `lambda: 0 → 0.1 → 0.25` 的保守 schedule 做 paired GAE 对照。原 PPO critic target 始终保持 GAE。
-6. **完成 oracle 诊断阶梯。**
+1. **小样本拟合诊断。** 固定高于重复噪声的分支样本，冻结特征与标签，分别报告训练/验证的中心化 MSE、zero-predictor 比值、concordant/discordant/predicted ties、Kendall-tau-b、状态内随机对应基准；先区分对齐/优化错误与泛化不足。
+2. **先验证 Event Value target 本身。** 对固定 SFT 的一部分 branch endpoint，让策略继续执行至 episode 结束，比较 `R_branch + gamma V_E` 的排序与真实剩余折扣回报，并对部分状态重复 continuation；目前 branch outcome 主要依赖 learned bootstrap，尚未证明它是任务回报的可靠 proxy。
+3. **端到端前端检查。** 在同一有标签轨迹比较 `cache teacher → Observer` 与 `RGB student → Observer` 的 boundary、progress 和 Value 指标，确定前端蒸馏误差是否传递为 Event/Value 误差。
+4. **提高候选可辨识性而非盲目增加状态数。** 在接触、姿态调整、临近完成/失败恢复等关键状态采样；比较更有差异的 Flow-SDE candidates、合理延长 branch horizon，且将实际 branch transitions 计入总 interaction budget。
+5. **重新收集 train / heldout episode group。** 当前只有四个 seed group，不能作为最终统计。应收集数百 state、更多独立 reset seeds，并冻结 Observer、RGB student、target Event Value 后训练/测试 Influence。
+6. **通过门槛后才开始 PPO 混合。** 至少预先定义并达到 heldout pairwise accuracy、Kendall-tau-b、top-1 regret 相对随机/zero control 的门槛；之后以 `lambda: 0 → 0.1 → 0.25` 的保守 schedule 做 paired GAE 对照。原 PPO critic target 始终保持 GAE。
+7. **完成 oracle 诊断阶梯。**
 
    \[
    \text{GAE}
@@ -340,4 +341,3 @@ git push user event-smdp-credit
 | all-candidate calibration raw branches | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/calibration_all_candidates_raw` |
 | offline Influence report | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/influence_offline/report.json` |
 | A6000 runtime log | `/home/chefmate/Data/pirl_a6000_run/logs/event_chunk5_calibration_all_candidates.log` |
-
