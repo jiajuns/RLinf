@@ -53,6 +53,37 @@ def test_event_value_targets_correct_each_internal_chunk_not_event_credit_averag
     torch.testing.assert_close(truncated_targets[:, 0], torch.tensor([2.0, 2.0]))
 
 
+def test_event_value_target_regression_terminal_padding_and_truncation_contract():
+    """Required two-step regression: [0,1], terminal, gamma=1 -> [1,1]."""
+    rewards = torch.tensor([[0.0], [1.0], [99.0]])
+    terminations = torch.tensor([[False], [False], [True], [False]])
+    truncations = torch.zeros_like(terminations)
+    ids = torch.tensor([[0], [0], [-1]])
+    target_values = torch.tensor([[0.0], [0.0], [123.0], [456.0]])
+    valid = torch.tensor([[True], [True], [False]])
+    targets, target_mask = event_boundary_value_targets(
+        rewards, terminations, truncations, ids, target_values,
+        gamma=1.0, bootstrap_on_truncation=False, valid_mask=valid,
+    )
+    torch.testing.assert_close(targets[:2, 0], torch.ones(2))
+    assert not target_mask[2, 0]  # padding cannot enter a V_E loss.
+
+    # A true terminal never bootstraps, while a sampling truncation follows
+    # the explicit switch rather than being silently treated as termination.
+    terminations[2] = False
+    truncations[2] = True
+    no_bootstrap, _ = event_boundary_value_targets(
+        rewards[:2], terminations[:3], truncations[:3], ids[:2], target_values[:3],
+        gamma=1.0, bootstrap_on_truncation=False,
+    )
+    with_bootstrap, _ = event_boundary_value_targets(
+        rewards[:2], terminations[:3], truncations[:3], ids[:2], target_values[:3],
+        gamma=1.0, bootstrap_on_truncation=True,
+    )
+    torch.testing.assert_close(no_bootstrap[:, 0], torch.ones(2))
+    torch.testing.assert_close(with_bootstrap[:, 0], torch.full((2,), 124.0))
+
+
 def test_event_sidecar_can_use_a_frozen_rgb_student_online():
     observer = EventObserver(30, 3, 4, hidden_dim=8, num_geometric_primitives=2, num_state_change_primitives=1)
     sidecar = OnlineEventValueSidecar(observer, EventValueCritic(8, hidden_dim=8),

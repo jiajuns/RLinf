@@ -15,7 +15,6 @@
 import numpy as np
 from pathlib import Path
 import torch
-import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
@@ -23,6 +22,13 @@ import rlinf.algorithms  # noqa: F401
 from rlinf.algorithms.expert import build_expert_model_config
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
 from rlinf.algorithms.event_intervention import EventInfluenceModel
+from rlinf.algorithms.event_sidecar_distributed import (
+    all_reduce_gradients,
+    broadcast_module,
+    distributed_ready,
+    global_count,
+    global_scalar_sum,
+)
 from rlinf.algorithms.event_value import (
     OnlineEventValueSidecar,
     infer_branch_future_event_values,
@@ -253,7 +259,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     state[key] = value.to(device)
 
     def _event_sidecar_distributed(self) -> bool:
-        return self._world_size > 1 and dist.is_available() and dist.is_initialized()
+        return distributed_ready(self._world_size)
 
     def _synchronize_event_sidecars_from_rank0(self) -> None:
         """Broadcast auxiliary modules after init/resume, never actor weights."""
@@ -263,8 +269,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self._event_influence_model is not None:
             modules.append(self._event_influence_model)
         for module in modules:
-            for tensor in list(module.parameters()) + list(module.buffers()):
-                dist.broadcast(tensor.data, src=0)
+            broadcast_module(module, world_size=self._world_size, src=0)
 
     def _all_reduce_auxiliary_gradients(self, module: nn.Module, *, normalizer: int | None = None) -> None:
         """Synchronize sidecar gradients with an explicit global normalizer.
@@ -274,29 +279,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         the summed gradient by global valid-example count therefore matches a
         true global masked mean and keeps all Adam steps identical.
         """
-        if not self._event_sidecar_distributed():
-            if normalizer is not None:
-                for parameter in module.parameters():
-                    if parameter.grad is not None:
-                        parameter.grad.div_(normalizer)
-            return
-        for parameter in module.parameters():
-            if parameter.grad is not None:
-                dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
-                parameter.grad.div_(normalizer if normalizer is not None else self._world_size)
+        all_reduce_gradients(module, world_size=self._world_size, normalizer=normalizer)
 
     def _global_auxiliary_count(self, local_count: int, device: torch.device) -> int:
-        count = torch.tensor(int(local_count), dtype=torch.long, device=device)
-        if self._event_sidecar_distributed():
-            dist.all_reduce(count, op=dist.ReduceOp.SUM)
-        return int(count.item())
+        return global_count(local_count, world_size=self._world_size, device=device)
 
     def _global_auxiliary_scalar(self, local_value: torch.Tensor) -> torch.Tensor:
         """Return a detached summed scalar on every rank for metrics only."""
-        value = local_value.detach().clone()
-        if self._event_sidecar_distributed():
-            dist.all_reduce(value, op=dist.ReduceOp.SUM)
-        return value
+        return global_scalar_sum(local_value, world_size=self._world_size)
 
     def _event_action_tensor(
         self, *, chunks: int, batch: int, action_chunk: int, device: torch.device

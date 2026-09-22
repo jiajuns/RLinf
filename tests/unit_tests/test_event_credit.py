@@ -79,6 +79,21 @@ def test_event_residual_lambda_zero_is_exactly_gae():
     torch.testing.assert_close(actual_returns, expected_returns)
 
 
+def test_zero_mix_does_not_require_or_read_invalid_event_tensors():
+    rewards = torch.tensor([[0.2], [0.3]])
+    dones = torch.tensor([[False], [False], [True]])
+    values = torch.tensor([[0.1], [0.2], [0.0]])
+    expected_advantage, expected_returns = compute_gae_advantages_and_returns(
+        rewards, dones=dones, values=values, gamma=0.9, gae_lambda=0.95, normalize_advantages=False
+    )
+    actual_advantage, actual_returns = compute_event_smdp_residual_advantages(
+        rewards, dones, values, None, None, None,
+        gamma=0.9, gae_lambda=0.95, event_mix_lambda=0.0, normalize_advantages=False,
+    )
+    torch.testing.assert_close(actual_advantage, expected_advantage)
+    torch.testing.assert_close(actual_returns, expected_returns)
+
+
 def test_event_residual_keeps_ppo_critic_return_on_gae_when_actor_mix_is_nonzero():
     rewards = torch.tensor([[1.0], [0.0]])
     dones = torch.tensor([[False], [False], [True]])
