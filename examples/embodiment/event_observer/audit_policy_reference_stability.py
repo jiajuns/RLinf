@@ -32,13 +32,25 @@ def _load_diagnostics(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             rep = np.asarray(payload["state_representations"], dtype=np.float32)
             candidates = np.asarray(payload["candidate_actions"], dtype=np.float32)
             refs = np.asarray(payload["policy_reference_actions"], dtype=np.float32)
+            available = np.asarray(
+                payload["policy_reference_available"], dtype=bool
+            ) if "policy_reference_available" in payload.files else np.ones(len(rep), dtype=bool)
             if rep.ndim != 2 or candidates.ndim != 4 or refs.ndim != 4:
                 raise ValueError(f"{file} has malformed reference tensors")
             if rep.shape[0] != candidates.shape[0] or rep.shape[0] != refs.shape[0] or refs.shape[1] < 2:
                 raise ValueError(f"{file} has unaligned or insufficient reference samples")
-            representations.append(rep)
-            primary_actions.append(candidates[:, 0].reshape(len(rep), -1))
-            references.append(refs.reshape(len(rep), refs.shape[1], -1))
+            if available.shape != (len(rep),):
+                raise ValueError(f"{file} has malformed reference availability mask")
+            # Bootstrap-only tail rows have no same-observation policy sample.
+            # Excluding them is preferable to treating padding zeros as a
+            # sampled reference action.
+            if not available.any():
+                continue
+            representations.append(rep[available])
+            primary_actions.append(candidates[available, 0].reshape(int(available.sum()), -1))
+            references.append(refs[available].reshape(int(available.sum()), refs.shape[1], -1))
+    if not representations:
+        raise ValueError("no diagnostic rows have valid policy-reference actions")
     return tuple(np.concatenate(values, axis=0) for values in (representations, primary_actions, references))
 
 

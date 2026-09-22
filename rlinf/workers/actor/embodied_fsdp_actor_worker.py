@@ -331,14 +331,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         They are model-inference samples, not simulator branches, and are
         deliberately excluded from interaction accounting.
         """
-        references = self.rollout_batch.get("influence_reference_actions")
+        references, _ = self._aligned_policy_reference_actions(
+            self.rollout_batch.get("influence_reference_actions"), chunks=chunks, batch=batch
+        )
         if references is None:
             return torch.zeros((chunks, batch), device=device, dtype=actions.dtype)
-        if references.ndim != 5 or references.shape[:2] != (chunks, batch):
-            raise RuntimeError(
-                "policy-relative Influence references must have shape "
-                "[chunks, batch, candidates, action_chunk, action_dim]"
-            )
         action_dim = self.cfg.actor.model.action_dim
         if references.shape[2] < 2 or references.shape[3:] != (action_chunk, action_dim):
             raise RuntimeError("policy-relative Influence reference chunks have an invalid shape")
@@ -352,6 +349,38 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             reference_actions,
         )
         return relative.transpose(0, 1)
+
+    def _aligned_policy_reference_actions(
+        self, references: torch.Tensor | None, *, chunks: int, batch: int
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Align delayed rollout reference chunks to the actor's chunk clock.
+
+        The rollout pipeline can omit the final bootstrap-only observation:
+        that observation has no policy action/reference but the branch sidecar
+        owns a terminal padding chunk.  Pad only this documented one-chunk
+        tail and propagate an explicit availability mask; never fabricate a
+        reference score for that tail.
+        """
+        if references is None:
+            return None, None
+        if references.ndim != 5 or references.shape[1] != batch:
+            raise RuntimeError(
+                "policy-relative Influence references must be "
+                "[chunks,batch,candidates,action_chunk,action_dim]; "
+                f"got {tuple(references.shape)} for chunks={chunks}, batch={batch}"
+            )
+        available = torch.ones(references.shape[:2], dtype=torch.bool, device=references.device)
+        if references.shape[0] == chunks:
+            return references, available
+        if references.shape[0] == chunks - 1:
+            tail = torch.zeros_like(references[:1])
+            return torch.cat((references, tail), dim=0), torch.cat(
+                (available, torch.zeros_like(available[:1])), dim=0
+            )
+        raise RuntimeError(
+            "policy-relative Influence reference clock is not compatible with branch clock: "
+            f"got {tuple(references.shape)}, expected {chunks} or {chunks - 1} chunks"
+        )
 
     def _event_credit_mix_lambda(self) -> float:
         """Return a conservative, branch-gated Event residual coefficient.
@@ -410,6 +439,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         branch_actions: torch.Tensor,
         state_representations: torch.Tensor,
         policy_reference_actions: torch.Tensor | None,
+        policy_reference_mask: torch.Tensor | None,
     ) -> None:
         """Persist raw matched-state branch diagnostics for offline auditing.
 
@@ -436,8 +466,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if policy_reference_actions is not None:
             if policy_reference_actions.ndim != 5 or policy_reference_actions.shape[:2] != branch_returns.shape[:2]:
                 raise RuntimeError(
-                    "policy-reference actions must be [chunks,batch,candidates,action_chunk,action_dim]"
+                    "policy-reference actions must be [chunks,batch,candidates,action_chunk,action_dim]; "
+                    f"got {tuple(policy_reference_actions.shape)}, expected prefix "
+                    f"{tuple(branch_returns.shape[:2])}"
                 )
+            if policy_reference_mask is None or policy_reference_mask.shape != branch_returns.shape[:2]:
+                raise RuntimeError("policy-reference availability mask is not aligned to branch returns")
         selected = branch_mask.bool()
         if not bool(selected.any()):
             return
@@ -502,6 +536,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 policy_reference_actions[selected].detach().float().cpu().numpy()
                 if policy_reference_actions is not None
                 else np.empty((int(selected.sum().item()), 0), dtype=np.float32)
+            ),
+            policy_reference_available=(
+                policy_reference_mask[selected].detach().cpu().numpy()
+                if policy_reference_mask is not None
+                else np.zeros((int(selected.sum().item()),), dtype=np.bool_)
             ),
             candidate_valid_mask=branch_valid[selected].detach().cpu().numpy(),
             branch_rewards=branch_rewards[selected].detach().float().cpu().numpy(),
@@ -703,6 +742,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         ).sum()
                         local_supervision_count = int(candidate_supervision_mask.sum().item())
                         local_outcome_count = local_supervision_count
+                    policy_reference_actions, policy_reference_mask = self._aligned_policy_reference_actions(
+                        self.rollout_batch.get("influence_reference_actions"), chunks=chunks, batch=batch
+                    )
                     self._write_event_branch_diagnostics(
                         sidecar_rollout=sidecar_rollout,
                         branch_returns=branch_returns,
@@ -721,9 +763,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                         branch_state_ids=branch_state_ids,
                         branch_actions=self.rollout_batch["branch_actions"].to(device),
                         state_representations=representations.permute(1, 0, 2),
-                        policy_reference_actions=self.rollout_batch.get("influence_reference_actions").to(device)
-                        if self.rollout_batch.get("influence_reference_actions") is not None
-                        else None,
+                        policy_reference_actions=(
+                            policy_reference_actions.to(device)
+                            if policy_reference_actions is not None
+                            else None
+                        ),
+                        policy_reference_mask=(
+                            policy_reference_mask.to(device)
+                            if policy_reference_mask is not None
+                            else None
+                        ),
                     )
                 elif self.cfg.algorithm.get("event_diagnostics", {}).get("output_dir", None):
                     raise RuntimeError(
