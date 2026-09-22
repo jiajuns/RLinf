@@ -331,7 +331,9 @@ R_{\mathrm{branch}}+\gamma\bar V_E(z_{\mathrm{endpoint}}),
 R_{\mathrm{branch}}+\gamma G_{\mathrm{continuation}}.
 \]
 
-首个 smoke state（25 control steps、2 candidate）成功执行和恢复：bootstrap 偏好 candidate 1（`0.942379 > 0.941706`），真实 SFT continuation 则偏好 candidate 0（`0.770043 > 0.762343`），即该单对排序相反。样本量为 1，**不能作为 Value 无效的结论**；它只证明新的直接标签校验已可运行。一个 3 个时间分层 state、3 candidates、每 endpoint 2 次 continuation 的运行正在 A6000 执行，结果产生前继续保持 `lambda=0`。
+首个 smoke state（25 control steps、2 candidate）成功执行和恢复：bootstrap 偏好 candidate 1（`0.942379 > 0.941706`），真实 SFT continuation 则偏好 candidate 0（`0.770043 > 0.762343`），即该单对排序相反。该单对不能作为 Value 无效的结论；它只证明新的直接标签校验已可运行。
+
+随后完成时间分层运行：3 个 state（25/75/125 control steps）\(\times\) 3 candidates \(\times\) 每个 endpoint 2 次 SFT continuation。在 8 个真实 continuation 非平局 pair 中，bootstrap 排序 concordant/discordant 为 `7/1`，pairwise accuracy `0.875`；每 endpoint continuation 标准差为 `0–7.66e-3`，与部分候选间 return 差异同量级。该结果说明当前 \(\bar V_E\) bootstrap **并非显然没有动作排序信号**，但样本只来自一条 time-stratified SFT 轨迹、存在 continuation 随机性，不能用作 Influence 或最终方法有效的证据。后续必须扩大独立 reset seed、接触/调整/临近终止状态覆盖，并报告 repeat-noise-normalized 排序。
 
 ## 9. 对当前方法效果的严格结论
 
