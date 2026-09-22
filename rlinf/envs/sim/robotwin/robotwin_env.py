@@ -168,7 +168,8 @@ class RoboTwinEnv(gym.Env):
                     chunk_dones.to(torch.long).argmax(dim=-1) + 1,
                     torch.full((self.num_envs,), requested_steps, dtype=torch.long, device=chunk_dones.device),
                 )
-                rewards.append(reward.detach().cpu())
+                reward_cpu = reward.detach().cpu()
+                rewards.append(reward_cpu)
                 durations.append(actual_steps.detach().cpu())
                 terminations.append(terminated.detach().cpu())
                 truncations.append(truncated.detach().cpu())
@@ -180,7 +181,8 @@ class RoboTwinEnv(gym.Env):
                     success = terminated
                 successes.append(torch.as_tensor(success, dtype=torch.bool).detach().cpu())
                 main = obs["main_images"]
-                main_images.append(main.detach().cpu())
+                main_cpu = main.detach().cpu()
+                main_images.append(main_cpu)
                 wrist = obs.get("wrist_images")
                 if wrist is None:
                     raise RuntimeError("RoboTwin Event branches require wrist RGB")
@@ -188,14 +190,15 @@ class RoboTwinEnv(gym.Env):
                 measured = obs.get("measured_state16")
                 if measured is None:
                     raise RuntimeError("RoboTwin Event branches require measured proprioception")
-                measured_states.append(measured.detach().cpu())
+                measured_cpu = measured.detach().cpu()
+                measured_states.append(measured_cpu)
                 # A terminal endpoint is valid: its bootstrap is masked in
                 # the actor.  Invalid means the environment returned a
                 # non-finite transport value, not merely that it terminated.
                 valid.append(
-                    torch.isfinite(reward)
-                    & torch.isfinite(measured).all(dim=-1)
-                    & torch.isfinite(main.to(torch.float32)).flatten(1).all(dim=-1)
+                    torch.isfinite(reward_cpu)
+                    & torch.isfinite(measured_cpu).all(dim=-1)
+                    & torch.isfinite(main_cpu.to(torch.float32)).flatten(1).all(dim=-1)
                 )
         finally:
             self.load_state(snapshot)
