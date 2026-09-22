@@ -421,14 +421,12 @@ policy_relative_transport_v3/
 | `3fe8af10` | Influence 使用全部 matched branch candidates，并保存 Event representation |
 | `e6f7b1e1` | 新增 grouped offline Influence 训练/验证工具 |
 | `d8e001e6` | 对齐 bootstrap 尾 chunk 的 policy reference，并为审计保存可用性掩码 |
+| `14412e22` | record-only 分支采集不再保存 20GB π0.5 checkpoint |
+| `046bb213` | 将 branch collection checkpoint 保存完全关闭（`save_interval=0`） |
 
 运行脚本 `examples/embodiment/run_robotwin_event_branch_a6000_smoke.sh` 也补充：可覆盖 checkpoint/output 路径、action chunk、branch interval、sidecar 学习开关，并显式提供 Curobo/PATH 给 A6000 Ray worker。
 
-用户远端 `user/event-smdp-credit` 当前因 GitHub SSH 临时关闭连接而**尚未推送**本轮本地 commits；远端恢复后应执行：
-
-```bash
-git push user event-smdp-credit
-```
+上述提交已推送至用户远端 `user/event-smdp-credit`。
 
 本地工作区还存在用户原有的未提交 docs 变动；本轮没有覆盖或纳入提交。
 
@@ -469,3 +467,77 @@ git push user event-smdp-credit
 | A6000 runtime log | `/home/chefmate/Data/pirl_a6000_run/logs/event_chunk5_calibration_all_candidates.log` |
 | 独立 split manifest | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_seed_split_v1/manifest.json` |
 | 当前独立 train 采集 | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_branch_validation_v1/train_v2/` |
+
+## 13. 2026-09-23 预注册独立 episode 审计（最新）
+
+### 13.1 固定协议与数据完整性
+
+本轮不改变网络、chunk 时间单位、折扣或监督公式，固定下列协议：
+
+- task：RoboTwin `adjust_bottle`；固定 pi0.5 SFT、Observer、RGB student 与 target Event Value；
+- 训练设置：完整 5-control-step action chunk，4 个真实 simulator branch candidates，候选 0 的重复动作用于噪声测量，8 个**未执行** Flow-SDE policy reference actions；`gamma=.99`、state-centered MSE、`lambda=0`、actor/Event Value 学习率为零；
+- 数据切分：从官方 train seed manifest 在采集前固定抽取 32 个互不重叠 seed：train 16、validation 8、test 8。开发阶段旧的 4 个 episode 不进入此 test；
+- train 产物有 4 个文件、64 个保存 state；validation/test 各有 8 个文件、各 32 个保存 state。可靠性筛选后，development 共 84 state（train 59、validation 25），test 有 28 state。
+
+采集期间出现两个**工程问题**，均已修复，且不改变已保留 branch `.npz`：
+
+1. 长驻 Ray 进程在第 4 个 epoch 前触发 63GB host-RAM 的 95% 保护。train 的四个 artifact 已覆盖全部 16 个预注册 seed；后续 validation/test 改成一 seed 一 Ray 生命周期。
+2. 每个短诊断作业仍在最终 epoch 强制保存约 20GB pi0.5 checkpoint，令验证数据占用约 152GB 并填满磁盘。删除的仅是本次冻结、不可恢复也不需要的 `checkpoints/`；branch artifact、SFT、Observer、RGB student 与 sidecar 全部保留。`runner.save_interval=0` 现明确关闭保存。最终 test 8/8 完成、零 checkpoint，磁盘保持约 192GB 空闲。
+
+### 13.2 独立排序结果
+
+Influence 的训练只使用 train，validation 只用于选择 checkpoint，test 只评一次。重复 action 合并后，每个 state 有 3 个独立候选；report 使用 true-label tie epsilon `1e-4`、prediction tie epsilon `0`，因此不会把纯输出缩放误计为预测平局。
+
+| split | pairwise accuracy | Kendall-\(\tau_b\) | top-1 regret | 可排序 pair | shuffle pairwise |
+|---|---:|---:|---:|---:|---:|
+| development validation | 0.5208 | 0.0333 | \(8.30\times10^{-4}\) | 48 | 0.4992 |
+| 独立 test | 0.4912 | -0.0145 | \(7.01\times10^{-4}\) | 57 | 0.4982 |
+
+validation 仅有极弱正信号；独立 test 的 pairwise 与 \(\tau_b\) 均没有超过随机基准。test 的 state-centered MSE 为 \(4.87\times10^{-6}\)，零预测器为 \(3.68\times10^{-6}\)，也不支持其学到稳定的候选差异。`top-1 regret` 比 shuffle 小，但单独一项不能推翻 pairwise、\(\tau_b\) 与 MSE 的负面证据。
+
+因此，**当前 Influence 不能通过 ranking gate，不能把 \(\hat I\) 接入非零 PPO Event credit**。当前所有在线运行仍是 `lambda=0`，没有 EventValue-RL 的成功率或样本效率增益可报告。
+
+### 13.3 标签与 policy-reference 诊断
+
+这轮结果并不等价于“分支标签全无信息”。可靠 test state 上：
+
+- repeat-action noise 中位数为 \(3.24\times10^{-5}\)，branch return spread 中位数为 \(5.61\times10^{-4}\)，约高 17 倍；p90 分别为 \(1.12\times10^{-4}\) 与 \(3.87\times10^{-3}\)；
+- 8-reference 的 policy-relative score 完全可复现；用 2/4 个 reference 重采样时，相对 8-reference 的 sign flip 分别为 9.23%/7.25%。因此后续若获准开启 PPO，第一版应至少保留 4、优选 8 个 reference；
+- 这证明参考基准和候选标签存在有限的动作敏感性，**但没有证明 bootstrap target 的排序等价于真实任务后续回报排序**。
+
+### 13.4 当前已知问题、未证实假设与决策
+
+**已知问题（有直接证据）**：跨 episode Influence 排序不能泛化；有效 test 样本只有 28 state / 57 pair，且每 state 只有 3 个独立候选，统计能力有限；branch target 中大部分信号来自短 branch endpoint 的 Event Value bootstrap。
+
+**尚未能归因的假设（不可写成结论）**：
+
+1. Event Value bootstrap 可能不能预测冻结 SFT 从 endpoint 继续执行至成功/失败的真实剩余回报；
+2. 关键决策状态覆盖不足，或 Flow-SDE 候选差异太小；
+3. Observer/RGB student 对全局 event 指标虽可用，但其候选间微小 Value 差异可能仍受前端误差影响；
+4. snapshot/restore 的低幅值噪声仍可能掩盖 near-tie pair，虽重复 action 已将其显式记录为 noise floor。
+
+**当前决策**：保持 `lambda=0`；不以本轮结果声称 intervention credit 有效；不通过增加 PPO epoch、换大 Influence 网络或扩网络结构来掩盖标签未验证问题。
+
+### 13.5 唯一高优先级的下一步
+
+在预注册 test 的时间分层 state 上，从每个 candidate 的完整 5-step endpoint 继续运行同一冻结 SFT 至终止，并比较：
+
+\[
+Y_{\mathrm{bootstrap}}=R_{\mathrm{branch}}+\gamma\bar V_E(z_{\mathrm{end}})
+\quad\text{vs.}\quad
+Y_{\mathrm{continuation}}=R_{\mathrm{branch}}+\gamma G_{\mathrm{SFT}}.
+\]
+
+对 near-tie pair 做重复 continuation 并记录方差。若两者排序不一致，优先修 Event Value/bootstrap horizon；若一致而 Influence 仍失败，才扩展独立 episode/关键状态覆盖，或比较现有 state-centered MSE 与可靠 pairwise Huber。只有连续性验证、独立 test ranking 与随机/反向 Influence falsification 都通过后，才开始 `lambda: 0→0.1→0.25` 的配对 PPO 对照。
+
+### 13.6 最新可复现实验产物
+
+| 产物 | 路径 |
+|---|---|
+| 固定 16/8/8 split | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_seed_split_v1/manifest.json` |
+| train artifacts | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_branch_validation_v1/train_v2/raw/` |
+| validation artifacts | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_branch_validation_v1/validation_isolated_v2/` |
+| test artifacts | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_branch_validation_v1/test_isolated_v4/` |
+| train/validation Influence report | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_branch_validation_v1/influence_independent_v1/development_report.json` |
+| 一次性 test report | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_branch_validation_v1/influence_independent_v1/test_report.json` |
+| test 2/4/8 reference 稳定性 | `/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/independent_branch_validation_v1/influence_independent_v1/test_reference_stability.json` |
