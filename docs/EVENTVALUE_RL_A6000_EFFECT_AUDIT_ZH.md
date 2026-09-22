@@ -379,6 +379,13 @@ state-centered MSE 只约束同一状态内的候选差异。若网络输出为 
 
 branch 的在线训练 loss 也已同步改为 candidate-score 与 candidate return 均作同状态中心化，避免把 raw score 回归到中心化 target。只有 `granularity=chunk`、`reference_candidates>=2` 且未来显式通过 ranking gate 时才允许非零 Event mixing；目前配置仍为 `max_lambda=0`。
 
+这条 transport 首次运行曾暴露一个独立的时间轴错误：reference/branch tensor 是 chunk 粒度，但被保留到了 RLinf 通用 PPO token shuffle，触发 `IndexError`。修复为：在 Value/Influence 更新和 advantage 构造完成后，显式从 actor minibatch 删除所有 chunk-clock sidecar tensor；PPO 只保留其 action-token 时间轴字段。修复后的 A6000 单环境冻结运行于 2026-09-22 正常完成（global step 1，完整 4 条 rollout、5 个 PPO update epoch、sidecar checkpoint 均落盘），没有 token-shuffle 错误。该运行固定 `lambda=0`、actor/critic LR=0，故只证明 online transport 与训练调用链，不产生方法效果结论：
+
+```text
+/home/chefmate/Data/pirl_a6000_run/outputs/event_effect_verified2/
+policy_relative_transport_v3/
+```
+
 续跑验证器新增 `--candidate-execution-order`。它允许以 `0,1,2` 和 `2,1,0` 等排列从同一 root snapshot 执行候选，但总是按 candidate identity 写出结果与 `execution_position`。下一次小规模 A6000 采集应比较同一 action 在不同执行位置的 endpoint 输入、bootstrap 与 continuation return：若差异系统性随 position 改变，则重复均值不能消除偏差，必须继续修复 snapshot/控制器状态；若主要是无方向随机波动，才能使用重复均值和方差构造可靠候选对。
 
 ## 9. 对当前方法效果的严格结论
