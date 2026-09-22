@@ -81,16 +81,28 @@ def main() -> None:
         if not branch["branch_valid"].all() or branch["branch_state_ids"].shape != (1, 3):
             raise AssertionError("branch validity/state fingerprint transport is incomplete")
         elapsed_after_branch = env.elapsed_steps.detach().cpu().clone()
+        branch_take_action_cnt = [
+            getattr(subenv.task, "take_action_cnt", None) for subenv in env.venv.envs
+        ]
         snapshot = env.get_state()
         action = torch.zeros((1, action_chunk, 14), dtype=torch.float32)
         first_obs_list, first_rewards, first_terms, first_truncs, _ = env.chunk_step(action, auto_reset=False)
         elapsed_after_first = env.elapsed_steps.detach().cpu().clone()
+        first_take_action_cnt = [
+            getattr(subenv.task, "take_action_cnt", None) for subenv in env.venv.envs
+        ]
         env.load_state(snapshot)
         elapsed_after_restore = env.elapsed_steps.detach().cpu().clone()
+        restored_take_action_cnt = [
+            getattr(subenv.task, "take_action_cnt", None) for subenv in env.venv.envs
+        ]
         second_obs_list, second_rewards, second_terms, second_truncs, _ = env.chunk_step(action, auto_reset=False)
         print({"elapsed_after_branch": elapsed_after_branch.tolist(), "elapsed_after_first": elapsed_after_first.tolist(),
                "elapsed_after_restore": elapsed_after_restore.tolist(), "first_truncated": first_truncs[:, -1].cpu().tolist(),
-               "second_truncated": second_truncs[:, -1].cpu().tolist()}, flush=True)
+               "second_truncated": second_truncs[:, -1].cpu().tolist(),
+               "take_action_cnt_after_branch": branch_take_action_cnt,
+               "take_action_cnt_after_first": first_take_action_cnt,
+               "take_action_cnt_after_restore": restored_take_action_cnt}, flush=True)
         first_obs, second_obs = first_obs_list[-1], second_obs_list[-1]
         torch.testing.assert_close(first_rewards.cpu(), second_rewards.cpu(), rtol=0, atol=0)
         torch.testing.assert_close(first_terms.cpu(), second_terms.cpu(), rtol=0, atol=0)

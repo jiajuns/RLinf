@@ -19,7 +19,12 @@ import torch
 
 
 _TASK_FIELDS = (
-    "run_steps", "reward_step", "eval_success", "stage_success_tag",
+    # RoboTwin exposes two action counters in different task paths.
+    # ``run_steps`` is used by dense-reward tasks, while
+    # ``gen_sparse_reward_data`` uses ``take_action_cnt`` to enforce its
+    # horizon.  Omitting the latter makes a candidate branch leak its action
+    # count into the next candidate even though PhysX was restored.
+    "run_steps", "take_action_cnt", "reward_step", "eval_success", "stage_success_tag",
     "plan_success", "instruction", "info",
 )
 
