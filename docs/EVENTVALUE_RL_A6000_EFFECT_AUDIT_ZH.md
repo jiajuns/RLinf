@@ -335,11 +335,40 @@ R_{\mathrm{branch}}+\gamma G_{\mathrm{continuation}}.
 
 随后完成时间分层运行：3 个 state（25/75/125 control steps）\(\times\) 3 candidates \(\times\) 每个 endpoint 2 次 SFT continuation。在 8 个真实 continuation 非平局 pair 中，bootstrap 排序 concordant/discordant 为 `7/1`，pairwise accuracy `0.875`；每 endpoint continuation 标准差为 `0–7.66e-3`，与部分候选间 return 差异同量级。该结果说明当前 \(\bar V_E\) bootstrap **并非显然没有动作排序信号**，但样本只来自一条 time-stratified SFT 轨迹、存在 continuation 随机性，不能用作 Influence 或最终方法有效的证据。后续必须扩大独立 reset seed、接触/调整/临近终止状态覆盖，并报告 repeat-noise-normalized 排序。
 
+## 8.3 重复标签、状态内目标与 snapshot 诊断（最新）
+
+### 重复候选合并
+
+原始 160 个 state 的 candidate 0/1 均为逐元素相同的 5-step action chunk。确定性 Influence 不可能为同一个 \((z,a)\) 拟合两个不同 target，因此训练工具现在将每个 state 内 action 相同（由 `max|a_i-a_j|=0` 判定）的 candidate 当作重复测量：先平均其 branch return，再在合并后的唯一候选上重算 state mean 和中心化 target。所有 160 个 state 都从 4 个候选合并为 3 个唯一 action；使用 `range(Y)>max(3×repeat-noise,10^{-4})` 后保留 87 个高信号 state。
+
+真实标签的 tie threshold 与预测 score 的 tie threshold 已分离：前者为 `1e-4`（并由 repeat-noise filter 进一步约束），后者在排序诊断设为 0，因此正数缩放不会伪造“预测平局”或改变排序结论。动作并非数值上几乎一致：合并后三候选 action-pair flattened \(L_2\) 的中位数为 `0.0503`、P90 为 `0.7784`。
+
+### 同一网络、两种损失的可学习性比较
+
+不改网络，均使用相同冻结 state representation/action、500 epoch、`lr=1e-3`、无 weight decay、训练 target std 归一化。结果中的 raw MSE 很大是预期的：网络可带有 state-common score offset；排序和 `state_centered_model_mse` 才是该诊断的可比量。
+
+| 目标 | 高信号 overfit：pairwise / \(\tau_b\) | group-held-out（seed 49，20 states）：pairwise / \(\tau_b\) | held-out shuffle pairwise |
+|---|---:|---:|---:|
+| state-centered MSE | 0.970 / 0.886 | **0.774 / 0.514** | 0.512 |
+| reliable-pair Huber | 0.953 / 0.853 | 0.755 / 0.479 | 0.497 |
+
+两种目标都能学到显著高于 statewise shuffle 的 held-out 排序；当前小数据下 state-centered MSE 略好，故它是后续不改架构时的首选。注意 validation 只来自一个 reset-seed group，53 个非标签平局 pair，不可作为最终泛化或 PPO 开启门槛；它只推翻了“Influence 连训练/held-out 排序都学不会”的旧判断。
+
+### 非零动作 snapshot repeat control
+
+为定位重复 label，`validate_bootstrap_with_sft_continuation.py` 新增了完全重复 action control、endpoint 分量 hash，以及对**同一份 endpoint 输入**连续两次 sidecar 推理的检查。结果为：
+
+* 同一 endpoint RGB/proprio 输入重复推理的 Event Value 差为 0，说明 sidecar 在 `eval()` 下是确定的；
+* 同一 root snapshot、同一 nonzero 5-step action 的两次分支，其 endpoint head RGB、right-wrist RGB 和 `measured_state16` hash 均不同；bootstrap Value 差 `6.32e-4`；
+* 独立的 snapshot validator 也以固定非零 action 复现了该现象：恢复后 reward/done/counter 一致，但 14/16 个 measured-state 元素有差异，最大 absolute difference `6.08e-6`。
+
+所以端点输入差异不是 Influence 或 sidecar 推理随机性，而是当前 RoboTwin/SAPIEN snapshot restore 后非零控制的细微物理/控制器状态差异。此时不能把 raw branch return 当无噪声 counterfactual 标签。短期安全处理是：重复 action 合并、按 repeat-noise 筛除 pair、保存 repeat variance 并在后续收集时按其降权；长期需要继续审计 RobotWin task/controller 的未快照 Python state，或采用官方支持的更严格 state clone API。`lambda` 仍保持 0。
+
 ## 9. 对当前方法效果的严格结论
 
 截至本报告：
 
-1. **接口正确性得到较强支持。** chunk 时间单位、独立 Value target、GAE 隔离、snapshot 恢复、sidecar 存档与单环境真实 RoboTwin rollout 均已经跑通。
+1. **除 snapshot 的严格物理重复性外，接口正确性得到较强支持。** chunk 时间单位、独立 Value target、GAE 隔离、sidecar 存档与单环境真实 RoboTwin rollout 均已经跑通；非零动作的 RoboTwin snapshot/restore 仍有可测 endpoint 偏差，不能再称为 exact same-state intervention。
 2. **Observer/RGB student 在修复后 cache 上已完成任务匹配训练。** 这不等价于泛化能力或在线端到端成功。
 3. **真实 candidate branches 有微弱但可测的 return spread。** 相比重复动作差异，平均候选差异约高一个数量级；但仍有不少 near-tie state，且 branch target 主要由短期 bootstrap 构成。
 4. **当前 Influence 尚未证明排序有效。** 即使用全部 candidate labels、episode-level heldout 和 100 epoch 离线训练，当前定义的 pairwise accuracy 为 0.302；还须用训练集拟合、tie-aware 分解和随机基准定位是优化、泛化、表示还是标签问题。

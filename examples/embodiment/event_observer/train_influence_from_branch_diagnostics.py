@@ -43,6 +43,43 @@ def _duplicate_action_noise(actions: np.ndarray, outcomes: np.ndarray, *, action
     return noise
 
 
+def _merge_duplicate_candidates(
+    actions: np.ndarray, outcomes: np.ndarray, *, action_eps: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
+    """Average repeated action measurements before deterministic regression.
+
+    A deterministic ``I_xi(z,a)`` cannot assign two values to byte-identical
+    chunks at the same state.  Repeated chunks are therefore measurement
+    replicates, not distinct ranking examples.  We retain their maximum
+    within-group deviation as a per-state noise estimate and only use the
+    merged mean as the supervised candidate outcome.
+    """
+    merged_actions, merged_outcomes, noise, candidate_counts = [], [], [], []
+    for state_actions, state_outcomes in zip(actions, outcomes, strict=True):
+        groups: list[list[int]] = []
+        for candidate in range(len(state_outcomes)):
+            for group in groups:
+                if np.max(np.abs(state_actions[candidate] - state_actions[group[0]])) <= action_eps:
+                    group.append(candidate)
+                    break
+            else:
+                groups.append([candidate])
+        merged_actions.append(np.stack([state_actions[group].mean(axis=0) for group in groups]))
+        merged_outcomes.append(np.asarray([state_outcomes[group].mean() for group in groups], dtype=np.float32))
+        candidate_counts.append(len(groups))
+        noise.append(max((float(np.ptp(state_outcomes[group])) for group in groups if len(group) > 1), default=0.0))
+    # TensorDataset needs a rectangular candidate axis.  Unequal counts are
+    # unusual for fixed Flow-SDE K; fail rather than padding an invalid action
+    # into pairwise supervision.
+    if len(set(candidate_counts)) != 1:
+        raise ValueError(f"duplicate-action merge produced variable candidate counts: {sorted(set(candidate_counts))}")
+    return (
+        np.stack(merged_actions), np.stack(merged_outcomes), np.asarray(noise, np.float32),
+        {"original_candidates": int(actions.shape[1]), "merged_candidates": int(candidate_counts[0]),
+         "states_with_repeated_actions": int(sum(count < actions.shape[1] for count in candidate_counts))},
+    )
+
+
 def _load_rows(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     representations, actions, returns, groups = [], [], [], []
     paths = sorted(root.glob("branch_diag_rank*_opt*_seen*.npz"))
@@ -90,7 +127,9 @@ def _validation_mask(groups: np.ndarray, fraction: float) -> np.ndarray:
     return np.isin(groups, np.asarray(selected))
 
 
-def _ranking_metrics(true_values: torch.Tensor, predicted_values: torch.Tensor, tie_eps: float) -> dict[str, float]:
+def _ranking_metrics(
+    true_values: torch.Tensor, predicted_values: torch.Tensor, label_tie_eps: float, prediction_tie_eps: float
+) -> dict[str, float]:
     truth = true_values.detach().cpu().numpy()
     prediction = predicted_values.detach().cpu().numpy()
     centered = truth - truth.mean(axis=1, keepdims=True)
@@ -101,11 +140,11 @@ def _ranking_metrics(true_values: torch.Tensor, predicted_values: torch.Tensor, 
             for right in range(left + 1, len(target)):
                 delta = target[left] - target[right]
                 predicted_delta = score[left] - score[right]
-                if abs(float(delta)) <= tie_eps:
+                if abs(float(delta)) <= label_tie_eps:
                     true_ties += 1
                     continue
                 eligible += 1
-                if abs(float(predicted_delta)) <= tie_eps:
+                if abs(float(predicted_delta)) <= prediction_tie_eps:
                     predicted_ties += 1
                 elif np.sign(delta) == np.sign(predicted_delta):
                     concordant += 1
@@ -115,6 +154,8 @@ def _ranking_metrics(true_values: torch.Tensor, predicted_values: torch.Tensor, 
     denominator = np.sqrt((concordant + discordant + true_ties) * (concordant + discordant + predicted_ties))
     zero_mse = float(np.mean(centered**2))
     model_mse = float(np.mean((prediction - centered) ** 2))
+    centered_prediction = prediction - prediction.mean(axis=1, keepdims=True)
+    state_centered_model_mse = float(np.mean((centered_prediction - centered) ** 2))
     return {
         "tie_aware_pairwise_accuracy": float(concordant / eligible) if eligible else float("nan"),
         "top1_regret_mean": float(np.mean(regrets)),
@@ -126,19 +167,21 @@ def _ranking_metrics(true_values: torch.Tensor, predicted_values: torch.Tensor, 
         "kendall_tau_b": float((concordant - discordant) / denominator) if denominator else float("nan"),
         "zero_predictor_mse": zero_mse,
         "model_mse": model_mse,
+        "state_centered_model_mse": state_centered_model_mse,
         "model_vs_zero_mse_ratio": model_mse / max(zero_mse, np.finfo(np.float64).eps),
     }
 
 
 def _statewise_shuffle_baseline(
-    true_values: torch.Tensor, predicted_values: torch.Tensor, tie_eps: float, rng: np.random.Generator, trials: int
+    true_values: torch.Tensor, predicted_values: torch.Tensor, label_tie_eps: float, prediction_tie_eps: float,
+    rng: np.random.Generator, trials: int
 ) -> dict[str, float]:
     """Break candidate correspondence while preserving each state's score distribution."""
     scores = predicted_values.detach().cpu().numpy()
     values = []
     for _ in range(trials):
         shuffled = np.stack([row[rng.permutation(len(row))] for row in scores])
-        values.append(_ranking_metrics(true_values, torch.from_numpy(shuffled), tie_eps))
+        values.append(_ranking_metrics(true_values, torch.from_numpy(shuffled), label_tie_eps, prediction_tie_eps))
     keys = ("tie_aware_pairwise_accuracy", "kendall_tau_b", "top1_regret_mean")
     return {f"random_statewise_{key}_mean": float(np.nanmean([item[key] for item in values])) for key in keys}
 
@@ -154,6 +197,10 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--validation-fraction", type=float, default=.25)
     parser.add_argument("--tie-eps", type=float, default=1e-4)
+    parser.add_argument("--label-tie-eps", type=float, default=None,
+                        help="True-return tie threshold; defaults to --tie-eps for compatibility.")
+    parser.add_argument("--prediction-tie-eps", type=float, default=None,
+                        help="Predicted-score tie threshold; defaults to --tie-eps. Set 0 for scale-invariant ranking.")
     parser.add_argument("--random-trials", type=int, default=100)
     parser.add_argument("--action-repeat-eps", type=float, default=0.0)
     parser.add_argument("--min-spread-over-repeat-noise", type=float, default=0.0,
@@ -162,6 +209,7 @@ def main() -> None:
     parser.add_argument("--normalized-target-loss", action="store_true",
                         help="Scale MSE gradients by train target std; model outputs remain in original return units.")
     parser.add_argument("--weight-decay", type=float, default=1e-2)
+    parser.add_argument("--objective", choices=("mse", "state_centered_mse", "pairwise_huber"), default="mse")
     parser.add_argument("--overfit-all-states", action="store_true",
                         help="Diagnostic only: train and report on the same frozen branch states; never a generalization result.")
     parser.add_argument("--seed", type=int, default=0)
@@ -169,8 +217,16 @@ def main() -> None:
     if not 0 < args.validation_fraction < 1 or args.epochs < 1:
         raise ValueError("validation fraction and epochs must be positive")
     torch.manual_seed(args.seed); np.random.seed(args.seed)
-    representations, actions, outcomes, groups = _load_rows(args.diagnostics)
-    repeat_noise = _duplicate_action_noise(actions, outcomes, action_eps=args.action_repeat_eps)
+    if args.label_tie_eps is None:
+        args.label_tie_eps = args.tie_eps
+    if args.prediction_tie_eps is None:
+        args.prediction_tie_eps = args.tie_eps
+    representations, raw_actions, raw_outcomes, groups = _load_rows(args.diagnostics)
+    raw_repeat_noise = _duplicate_action_noise(raw_actions, raw_outcomes, action_eps=args.action_repeat_eps)
+    actions, outcomes, repeat_noise, merge_audit = _merge_duplicate_candidates(
+        raw_actions, raw_outcomes, action_eps=args.action_repeat_eps
+    )
+    repeat_noise = np.maximum(repeat_noise, raw_repeat_noise)
     state_spread = outcomes.max(axis=1) - outcomes.min(axis=1)
     threshold = np.maximum(args.min_absolute_spread, args.min_spread_over_repeat_noise * repeat_noise)
     keep = state_spread > threshold
@@ -194,19 +250,41 @@ def main() -> None:
     train_actions = torch.from_numpy(actions[~validation])
     train_targets = torch.from_numpy(targets[~validation])
     train_returns = torch.from_numpy(outcomes[~validation])
-    train = TensorDataset(train_rep, train_actions, train_targets)
+    train_noise = torch.from_numpy(repeat_noise[~validation])
+    train = TensorDataset(train_rep, train_actions, train_targets, train_noise)
     loader = DataLoader(train, batch_size=args.batch_size, shuffle=True)
     val_rep = torch.from_numpy(representations[validation])
     val_actions = torch.from_numpy(actions[validation])
     val_targets = torch.from_numpy(targets[validation])
     val_returns = torch.from_numpy(outcomes[validation])
+    val_noise = torch.from_numpy(repeat_noise[validation])
     target_scale = float(train_targets.std().clamp_min(1e-8)) if args.normalized_target_loss else 1.0
+    def objective(prediction: torch.Tensor, target: torch.Tensor, action: torch.Tensor, state_noise: torch.Tensor) -> tuple[torch.Tensor, int]:
+        if args.objective == "mse":
+            return EventInfluenceModel.loss(prediction / target_scale, target / target_scale), int(prediction.numel())
+        centered_prediction = prediction - prediction.mean(dim=1, keepdim=True)
+        if args.objective == "state_centered_mse":
+            return EventInfluenceModel.loss(centered_prediction / target_scale, target / target_scale), int(prediction.numel())
+        # Candidate-pair Huber loss is invariant to a state-common score
+        # offset.  Pairs at/below their measured repeat-noise floor have no
+        # identifiable ordering and are excluded rather than treated as zero.
+        left, right = torch.triu_indices(action.shape[1], action.shape[1], offset=1, device=action.device)
+        target_delta = target[:, left] - target[:, right]
+        prediction_delta = centered_prediction[:, left] - centered_prediction[:, right]
+        pair_noise = state_noise[:, None] * args.min_spread_over_repeat_noise
+        reliable = target_delta.abs() > torch.maximum(pair_noise, torch.full_like(pair_noise, args.min_absolute_spread))
+        if not bool(reliable.any()):
+            return prediction.sum() * 0.0, 0
+        return torch.nn.functional.huber_loss(
+            prediction_delta[reliable] / target_scale, target_delta[reliable] / target_scale, reduction="mean", delta=1.0
+        ), int(reliable.sum().item())
+
     best = float("inf"); best_state = None; history = []
     for epoch in range(args.epochs):
         model.train()
-        for rep, action, target in loader:
+        for rep, action, target, state_noise in loader:
             prediction = model(rep.unsqueeze(1).expand(-1, action.shape[1], -1), action)
-            loss = EventInfluenceModel.loss(prediction / target_scale, target / target_scale)
+            loss, _ = objective(prediction, target, action, state_noise)
             optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
         model.eval()
         with torch.no_grad():
@@ -215,14 +293,19 @@ def main() -> None:
             evaluation_actions = train_actions if args.overfit_all_states else val_actions
             evaluation_targets = train_targets if args.overfit_all_states else val_targets
             evaluation_returns = train_returns if args.overfit_all_states else val_returns
+            evaluation_noise = train_noise if args.overfit_all_states else val_noise
             prediction = model(evaluation_rep.unsqueeze(1).expand(-1, evaluation_actions.shape[1], -1), evaluation_actions)
-            value_loss = float(EventInfluenceModel.loss(prediction / target_scale, evaluation_targets / target_scale))
-            train_ranking = _ranking_metrics(train_returns, train_prediction, args.tie_eps)
-            ranking = _ranking_metrics(evaluation_returns, prediction, args.tie_eps)
+            value_loss, reliable_pairs = objective(prediction, evaluation_targets, evaluation_actions, evaluation_noise)
+            value_loss = float(value_loss)
+            train_ranking = _ranking_metrics(train_returns, train_prediction, args.label_tie_eps, args.prediction_tie_eps)
+            ranking = _ranking_metrics(evaluation_returns, prediction, args.label_tie_eps, args.prediction_tie_eps)
             random_baseline = _statewise_shuffle_baseline(
-                evaluation_returns, prediction, args.tie_eps, np.random.default_rng(args.seed + epoch), args.random_trials
+                evaluation_returns, prediction, args.label_tie_eps, args.prediction_tie_eps,
+                np.random.default_rng(args.seed + epoch), args.random_trials
             )
-        history.append({"epoch": epoch, "train": train_ranking, "validation": ranking, "validation_random_baseline": random_baseline})
+        history.append({"epoch": epoch, "train": train_ranking, "validation": ranking,
+                        "validation_objective": value_loss, "validation_reliable_pairs": reliable_pairs,
+                        "validation_random_baseline": random_baseline})
         if value_loss < best:
             best = value_loss
             best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
@@ -230,20 +313,23 @@ def main() -> None:
     model.load_state_dict(best_state)
     payload["influence_model"] = model.state_dict()
     payload["influence_optimizer"] = optimizer.state_dict()
-    best_metrics = history[int(np.argmin([row["validation"]["model_mse"] for row in history]))]
+    best_metrics = history[int(np.argmin([row["validation_objective"] for row in history]))]
     payload["offline_influence_training"] = {
         "diagnostics": str(args.diagnostics), "states": int(len(outcomes)), "train_states": int((~validation).sum()),
         "validation_states": int(validation.sum()), "best_validation_mse": best,
-        "best_epoch": int(np.argmin([row["validation"]["model_mse"] for row in history])),
+        "best_epoch": int(np.argmin([row["validation_objective"] for row in history])),
         "diagnostic_settings": {
             "overfit_all_states": args.overfit_all_states, "normalized_target_loss": args.normalized_target_loss,
             "target_scale": target_scale, "action_repeat_eps": args.action_repeat_eps,
             "min_spread_over_repeat_noise": args.min_spread_over_repeat_noise,
             "min_absolute_spread": args.min_absolute_spread,
+            "objective": args.objective, "label_tie_eps": args.label_tie_eps,
+            "prediction_tie_eps": args.prediction_tie_eps,
         },
         "signal_audit": {
             "repeat_noise_median": float(np.median(repeat_noise)), "repeat_noise_p90": float(np.quantile(repeat_noise, .9)),
             "state_spread_median": float(np.median(state_spread)), "state_spread_p90": float(np.quantile(state_spread, .9)),
+            "duplicate_candidate_merge": merge_audit,
         },
     }
     args.output_sidecar.parent.mkdir(parents=True, exist_ok=True)

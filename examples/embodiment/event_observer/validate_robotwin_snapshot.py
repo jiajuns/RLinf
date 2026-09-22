@@ -71,6 +71,10 @@ def main() -> None:
     parser.add_argument("--robotwin-source", type=Path, required=True)
     parser.add_argument("--shader", choices=("minimal", "default", "rt"), default="minimal")
     parser.add_argument("--disable-denoiser", action="store_true")
+    parser.add_argument("--action-steps", type=int, default=5,
+                        help="Full control chunk used for exact restore validation.")
+    parser.add_argument("--action-value", type=float, default=.1,
+                        help="Nonzero deterministic control exposes Python-side controller state omitted by a snapshot.")
     args = parser.parse_args()
     os.environ.setdefault("EMBODIED_PATH", str(args.repo / "examples/embodiment"))
     os.environ.setdefault("REPO_PATH", str(args.repo))
@@ -104,7 +108,9 @@ def main() -> None:
         initial_obs, _ = env.reset()
         if initial_obs.get("measured_state16") is None or initial_obs["measured_state16"].shape != (1, 16):
             raise AssertionError("RoboTwin online observer did not receive measured_state16")
-        action_chunk = 50
+        if args.action_steps < 1:
+            raise ValueError("--action-steps must be positive")
+        action_chunk = args.action_steps
         repeated_actions = torch.zeros((1, 2, action_chunk, 14), dtype=torch.float32)
         # A branch is allowed to produce labels, but must return the live
         # rollout exactly to its pre-branch state before PPO continues.
@@ -130,7 +136,7 @@ def main() -> None:
             getattr(subenv.task, "take_action_cnt", None) for subenv in env.venv.envs
         ]
         snapshot = env.get_state()
-        action = torch.zeros((1, action_chunk, 14), dtype=torch.float32)
+        action = torch.full((1, action_chunk, 14), args.action_value, dtype=torch.float32)
         first_obs_list, first_rewards, first_terms, first_truncs, _ = env.chunk_step(action, auto_reset=False)
         elapsed_after_first = env.elapsed_steps.detach().cpu().clone()
         first_take_action_cnt = [
@@ -166,7 +172,7 @@ def main() -> None:
                "actual_duration": branch["branch_horizons"].cpu().tolist(),
                "repeat_branch_reward_abs_diff": (branch["branch_rewards"][:, 0] - branch["branch_rewards"][:, 1]).abs().cpu().tolist(),
                "repeat_branch_proprio_abs_max": (branch["branch_measured_state16"][:, 0] - branch["branch_measured_state16"][:, 1]).abs().max().cpu().item(),
-               "reward": first_rewards.sum(-1).cpu().tolist(),
+               "action_value": args.action_value, "reward": first_rewards.sum(-1).cpu().tolist(),
                "rgb_mismatch_fraction": image_mismatch_fraction(first_obs, second_obs)})
     finally:
         env.offload(clear_cache=True)

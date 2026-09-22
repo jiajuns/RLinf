@@ -11,6 +11,7 @@ not rank actual remaining return.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,18 @@ def _sidecar_value(sidecar: OnlineEventValueSidecar, history: list[dict[str, tor
     wrist = torch.cat([_right_wrist(item) for item in history], dim=0).unsqueeze(0).to("cuda")
     measured = torch.cat([item["measured_state16"] for item in history], dim=0).unsqueeze(0).to("cuda")
     return float(sidecar.infer_images(head, wrist, measured, use_target_value=True).values[0, -1].cpu())
+
+
+def _endpoint_fingerprint(obs: dict[str, torch.Tensor]) -> dict[str, str]:
+    """Hash each online sidecar input component, never simulator oracle fields."""
+    def digest(value: torch.Tensor) -> str:
+        return hashlib.sha256(value.detach().cpu().contiguous().numpy().tobytes()).hexdigest()[:16]
+    return {"head_rgb": digest(obs["main_images"]), "right_wrist_rgb": digest(_right_wrist(obs)),
+            "measured_state16": digest(obs["measured_state16"])}
+
+
+def _action_fingerprint(action: torch.Tensor) -> str:
+    return hashlib.sha256(action.detach().cpu().contiguous().numpy().tobytes()).hexdigest()[:16]
 
 
 def _sample_action(model: torch.nn.Module, obs: dict[str, torch.Tensor], seed: int) -> torch.Tensor:
@@ -98,6 +111,8 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=.99)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--tie-eps", type=float, default=1e-4)
+    parser.add_argument("--duplicate-first-candidate", action="store_true",
+                        help="Replace the last sampled candidate by candidate 0 to measure restore/input/value repeat noise.")
     args = parser.parse_args()
     if args.candidates < 2 or args.continuation_repeats < 1 or not 0 < args.gamma <= 1:
         raise ValueError("need >=2 candidates, >=1 repeat and gamma in (0,1]")
@@ -123,13 +138,17 @@ def main() -> None:
             if current_chunk in target_chunks:
                 root = env.get_state(); root_history = list(history)
                 candidate_actions = [_sample_action(model, observation, args.seed + 1009 * current_chunk + candidate) for candidate in range(args.candidates)]
+                if args.duplicate_first_candidate:
+                    candidate_actions[-1] = candidate_actions[0].clone()
                 branch_rows = []
                 try:
                     for candidate, action in enumerate(candidate_actions):
                         env.load_state(root)
                         endpoint, branch_reward, terminal = _chunk(env, action)
                         endpoint_history = root_history + [endpoint]
-                        bootstrap = branch_reward if terminal else branch_reward + args.gamma * _sidecar_value(sidecar, endpoint_history)
+                        first_value = _sidecar_value(sidecar, endpoint_history)
+                        second_value = _sidecar_value(sidecar, endpoint_history)
+                        bootstrap = branch_reward if terminal else branch_reward + args.gamma * first_value
                         endpoint_state = env.get_state()
                         continuation_returns = []
                         for repeat in range(args.continuation_repeats):
@@ -146,15 +165,31 @@ def main() -> None:
                             continuation_returns.append(continuation_reward)
                         branch_rows.append({
                             "candidate": candidate, "branch_reward": branch_reward, "terminal": terminal,
-                            "bootstrap_target": bootstrap, "continuation_returns": continuation_returns,
+                            "bootstrap_target": bootstrap, "endpoint_value_first": first_value,
+                            "endpoint_value_repeat_absdiff": abs(first_value - second_value),
+                            "endpoint_input_fingerprint": _endpoint_fingerprint(endpoint),
+                            "action_fingerprint": _action_fingerprint(action), "continuation_returns": continuation_returns,
                             "continuation_mean": float(np.mean(continuation_returns)), "continuation_std": float(np.std(continuation_returns)),
                         })
                 finally:
                     env.load_state(root)
                 bootstrap = np.asarray([row["bootstrap_target"] for row in branch_rows])
                 continuation = np.asarray([row["continuation_mean"] for row in branch_rows])
+                repeat_controls = []
+                for left in range(len(branch_rows)):
+                    for right in range(left + 1, len(branch_rows)):
+                        if branch_rows[left]["action_fingerprint"] == branch_rows[right]["action_fingerprint"]:
+                            repeat_controls.append({
+                                "candidates": [left, right],
+                                "endpoint_components_equal": {
+                                    key: branch_rows[left]["endpoint_input_fingerprint"][key] == branch_rows[right]["endpoint_input_fingerprint"][key]
+                                    for key in branch_rows[left]["endpoint_input_fingerprint"]
+                                },
+                                "bootstrap_absdiff": abs(branch_rows[left]["bootstrap_target"] - branch_rows[right]["bootstrap_target"]),
+                                "value_absdiff": abs(branch_rows[left]["endpoint_value_first"] - branch_rows[right]["endpoint_value_first"]),
+                            })
                 reports.append({"chunk_index": current_chunk, "elapsed_control_steps": int(env.elapsed_steps[0]), "branches": branch_rows,
-                                "ranking": _rank_metrics(bootstrap, continuation, args.tie_eps)})
+                                "repeat_controls": repeat_controls, "ranking": _rank_metrics(bootstrap, continuation, args.tie_eps)})
             if current_chunk == max(target_chunks):
                 break
             action = _sample_action(model, observation, args.seed + current_chunk)
