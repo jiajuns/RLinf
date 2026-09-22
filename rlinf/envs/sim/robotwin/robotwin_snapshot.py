@@ -57,14 +57,18 @@ def snapshot_robotwin_env(env: Any) -> bytes:
         payload = {
             "format": "rlinf_robotwin_snapshot_v1",
             "subenv_states": subenv_states,
-            "prev_step_reward": env.prev_step_reward.detach().cpu(),
-            "elapsed_steps": getattr(env, "_elapsed_steps", None).detach().cpu()
+            # ``.cpu()`` aliases storage when RoboTwin runs on CPU. Branches
+            # mutate these tensors in-place, so every bookkeeping tensor must
+            # be cloned or a supposedly restored branch leaks elapsed/done
+            # state into the live trajectory.
+            "prev_step_reward": env.prev_step_reward.detach().cpu().clone(),
+            "elapsed_steps": getattr(env, "_elapsed_steps", None).detach().cpu().clone()
             if hasattr(env, "_elapsed_steps") else None,
-            "success_once": getattr(env, "success_once", None).detach().cpu()
+            "success_once": getattr(env, "success_once", None).detach().cpu().clone()
             if hasattr(env, "success_once") else None,
-            "fail_once": getattr(env, "fail_once", None).detach().cpu()
+            "fail_once": getattr(env, "fail_once", None).detach().cpu().clone()
             if hasattr(env, "fail_once") else None,
-            "returns": getattr(env, "returns", None).detach().cpu()
+            "returns": getattr(env, "returns", None).detach().cpu().clone()
             if hasattr(env, "returns") else None,
             "is_start": env.is_start,
             "python_rng": random.getstate(),
